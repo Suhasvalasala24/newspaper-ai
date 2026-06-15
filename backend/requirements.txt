@@ -1,0 +1,4 @@
+# Python dependencies for NewsAI backend
+# Install with: pip install -r requirements.txt
+
+edge-tts>=6.1.9

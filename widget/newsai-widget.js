@@ -779,15 +779,23 @@ ${langRule}`;
       .trim();
   }
 
-  // ── Voice output — synchronous Web Speech API (no async gap = no autoplay block) ──
-  // KEY: async operations between a user-gesture and audio.play()/speechSynthesis.speak()
-  // break Chrome's autoplay context. We call getVoices() synchronously and speak immediately.
-  // SpeechSynthesis is exempt from autoplay restrictions unlike HTMLAudioElement.
+  // ─── Voice Output ─────────────────────────────────────────────────────────
+  // Two-tier TTS:
+  //   Tier 1: Backend /api/tts → Microsoft Edge neural voices (te-IN-MohanNeural etc.)
+  //           Much higher quality, especially for Telugu. Requires the backend running.
+  //   Tier 2: Web Speech API fallback — works without backend but Telugu quality is poor.
+  //
+  // AudioContext trick: create AudioContext synchronously inside the click handler so
+  // Chrome's autoplay permission is granted, then do the async backend fetch & decode.
+  // The already-unlocked AudioContext plays audio even after the async gap.
+  //
+  // backendTtsAvailable: null = not checked yet, true = working, false = unavailable.
 
-  function startSpeaking(btn, text) {
-    if (!window.speechSynthesis) return;
+  const BACKEND_TTS_URL = 'http://localhost:3001';
+  let backendTtsAvailable = null;
 
-    speechSynthesis.cancel();
+  async function startSpeaking(btn, text) {
+    if (window.speechSynthesis) speechSynthesis.cancel();
 
     isSpeaking = true;
     speakingMsgEl = btn;
@@ -800,9 +808,61 @@ ${langRule}`;
       btn.innerHTML = ICONS.speaker; btn.classList.remove('newsai-speaking');
     };
 
-    const isTeluguText = (text.match(/[ఀ-౿]/g) || []).length > 2;
-    const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
+    const cleanText     = cleanForSpeech(text);
+    const isTeluguText  = (text.match(/[ఀ-౿]/g) || []).length > 2;
+    const lang          = isTeluguText ? 'te' : 'en';
 
+    // ── Tier 1: Backend Edge TTS ────────────────────────────────────────────
+    if (backendTtsAvailable !== false) {
+      let audioCtx;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+      } catch (_) {
+        audioCtx = null;
+      }
+
+      if (audioCtx) {
+        try {
+          const resp = await fetch(`${BACKEND_TTS_URL}/api/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: cleanText, lang }),
+            signal: AbortSignal.timeout(20_000),
+          });
+
+          if (resp.ok) {
+            backendTtsAvailable = true;
+            const arrayBuffer = await resp.arrayBuffer();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+            source.onended = () => { try { audioCtx.close(); } catch (_) {} resetBtn(); };
+            source.start();
+
+            currentUtterance = {
+              _type: 'backend',
+              stop: () => { try { source.stop(); audioCtx.close(); } catch (_) {} },
+            };
+            console.log(`[NewsAI TTS] Backend Edge TTS playing (${lang})`);
+            return;
+          } else {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+        } catch (e) {
+          console.log('[NewsAI TTS] Backend unavailable, falling back to Web Speech API:', e.message);
+          try { audioCtx.close(); } catch (_) {}
+          backendTtsAvailable = false;
+        }
+      }
+    }
+
+    // ── Tier 2: Web Speech API fallback ────────────────────────────────────
+    if (!window.speechSynthesis) { resetBtn(); return; }
+
+    const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
     let voice;
     if (isTeluguText) {
       voice = voices.find(v => v.lang === 'te-IN')
@@ -819,19 +879,27 @@ ${langRule}`;
         || voices[0] || null;
     }
 
-    const utterance = new SpeechSynthesisUtterance(cleanForSpeech(text));
-    utterance.lang = isTeluguText ? 'te-IN' : 'en-IN';
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.lang  = isTeluguText ? 'te-IN' : 'en-IN';
     if (voice) utterance.voice = voice;
-    utterance.rate = 0.92;
+    utterance.rate  = 0.92;
     utterance.onend = resetBtn;
     utterance.onerror = (e) => { console.warn('[NewsAI TTS]', e.error); resetBtn(); };
 
-    currentUtterance = utterance;
+    currentUtterance = { _type: 'webspeech', utterance };
     speechSynthesis.speak(utterance);
   }
 
   function stopSpeaking() {
-    if (window.speechSynthesis) speechSynthesis.cancel();
+    if (currentUtterance) {
+      if (currentUtterance._type === 'backend') {
+        currentUtterance.stop();
+      } else if (window.speechSynthesis) {
+        speechSynthesis.cancel();
+      }
+    } else if (window.speechSynthesis) {
+      speechSynthesis.cancel();
+    }
     isSpeaking = false;
     if (speakingMsgEl) {
       speakingMsgEl.innerHTML = ICONS.speaker;

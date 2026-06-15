@@ -4,6 +4,7 @@ const express = require('express');
 const cors    = require('cors');
 const { ingestPdf } = require('./routes/ingest-pdf');
 const { scrape }    = require('./routes/scrape');
+const { tts }       = require('./routes/tts');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -34,6 +35,14 @@ app.post('/api/ingest-pdf', ingestPdf);
  * Returns headlines and summaries scraped from the newspaper homepage.
  */
 app.get('/api/scrape', scrape);
+
+/**
+ * POST /api/tts
+ * Body: { text: string, lang: "te" | "en", voice?: string }
+ * Returns MP3 audio stream using Microsoft Edge TTS neural voices.
+ * Requires: pip install edge-tts
+ */
+app.post('/api/tts', tts);
 
 /**
  * GET /api/rss?url=https://newspaper.com/rss.xml
@@ -67,6 +76,7 @@ app.listen(PORT, () => {
   console.log('  POST /api/ingest-pdf  — PDF text extraction');
   console.log('  GET  /api/scrape      — Web scraping proxy');
   console.log('  GET  /api/rss         — RSS CORS proxy');
+  console.log('  POST /api/tts         — Edge TTS neural voice (pip install edge-tts)');
 });
 
 module.exports = app;
