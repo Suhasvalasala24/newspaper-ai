@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Eenadu — Test Page (NewsAI Widget Preview)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #f5f5f5; color: #222; }
+    header {
+      background: #C0392B; color: white; padding: 14px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    header h1 { font-size: 22px; letter-spacing: 1px; }
+    header nav a { color: rgba(255,255,255,0.85); text-decoration: none; margin-left: 16px; font-size: 13px; }
+    header nav a:hover { color: #fff; }
+    .hero {
+      background: linear-gradient(135deg,#C0392B 0%, #8e1c14 100%);
+      color: white; padding: 40px 24px; text-align: center;
+    }
+    .hero h2 { font-size: 28px; margin-bottom: 8px; }
+    .hero p { opacity: 0.9; font-size: 15px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(280px,1fr)); gap: 16px; padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.07); }
+    .card-img { background: #e0e0e0; height: 120px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 13px; }
+    .card-body { padding: 14px; }
+    .card-section { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #C0392B; font-weight: 700; margin-bottom: 4px; }
+    .card-title { font-size: 15px; font-weight: 600; line-height: 1.4; margin-bottom: 6px; }
+    .card-meta { font-size: 11px; color: #888; }
+    footer { background: #222; color: #aaa; text-align: center; padding: 20px; font-size: 12px; margin-top: 24px; }
+
+    /* Dev banner */
+    .dev-banner {
+      background: #fff3cd; border-bottom: 2px solid #ffc107;
+      padding: 10px 24px; font-size: 12px; color: #555; text-align: center;
+    }
+    .dev-banner strong { color: #333; }
+    .dev-banner code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+  </style>
+</head>
+<body>
+
+  <div class="dev-banner">
+    <strong>🛠 NewsAI Widget Test Page</strong> — Open browser console (F12) to debug.
+    Get a <strong>free</strong> Groq API key at <a href="https://console.groq.com" target="_blank">console.groq.com</a> (no credit card) and paste it in <code>test.html</code> → <code>groqApiKey</code>.
+    The chatbot FAB appears in the bottom-right corner.
+  </div>
+
+  <header>
+    <h1>ఈనాడు · Eenadu</h1>
+    <nav>
+      <a href="#">National</a>
+      <a href="#">Telangana</a>
+      <a href="#">Sports</a>
+      <a href="#">Business</a>
+      <a href="#">Cinema</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h2>ఈ రోజు పత్రిక — Today's Edition</h2>
+    <p>Latest news from Telangana, Andhra Pradesh, India, and the world</p>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">National</div>
+        <div class="card-title">Parliament budget session concludes with key bills passed</div>
+        <div class="card-meta">Today · 6:30 AM</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">Telangana</div>
+        <div class="card-title">Hyderabad Metro expansion approved for new corridors</div>
+        <div class="card-meta">Today · 7:15 AM</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">Sports</div>
+        <div class="card-title">India wins third Test match against England in thrilling finish</div>
+        <div class="card-meta">Today · 9:00 AM</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">Business</div>
+        <div class="card-title">Sensex rallies 800 points on strong Q4 earnings reports</div>
+        <div class="card-meta">Today · 10:30 AM</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">International</div>
+        <div class="card-title">G7 nations agree on new climate commitments at summit</div>
+        <div class="card-meta">Today · 11:00 AM</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-img">[Photo]</div>
+      <div class="card-body">
+        <div class="card-section">Cinema</div>
+        <div class="card-title">Tollywood blockbuster crosses ₹500 crore worldwide</div>
+        <div class="card-meta">Today · 8:45 AM</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>© 2026 Eenadu · All rights reserved · NewsAI widget test environment</footer>
+
+  <!-- ── NewsAI Widget ── -->
+  <script>
+    window.NewsAIConfig = {
+      // Point to your config file (can be a relative path when testing locally)
+      config: {
+        brand: {
+          name: "Eenadu AI",
+          shortName: "ఈ",
+          primaryColor: "#C0392B",
+          welcomeMessage: "నమస్కారం! నేను ఈనాడు AI. ఈ రోజు పేపర్ గురించి ఏదైనా అడగండి!",
+          welcomeMessageEn: "Hello! I'm your Eenadu AI assistant. Ask me anything about today's paper!"
+        },
+        languages: ["te", "en"],
+        defaultLanguage: "te",
+        sections: ["National", "Telangana", "Andhra Pradesh", "International", "Sports", "Business", "Cinema"],
+        contentSource: {
+          type: "rss",
+          url: "http://localhost:3001/api/rss?url=https://www.eenadu.net/rss.xml"
+        },
+        // ⬇ Get a FREE key at https://console.groq.com (no credit card needed)
+        groqApiKey: "YOUR_GROQ_API_KEY_HERE",  // Get free at console.groq.com
+        llmProvider: "groq",
+        llmModel: "llama-3.3-70b-versatile",
+        position: "bottom-right"
+      }
+    };
+  </script>
+  <script src="widget/newsai-config-loader.js"></script>
+  <script src="widget/newsai-content.js"></script>
+  <script src="widget/newsai-widget.js"></script>
+
+</body>
+</html>

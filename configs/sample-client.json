@@ -1,0 +1,30 @@
+{
+  "brand": {
+    "name": "YourPaper AI",           // Display name shown in the chat header
+    "shortName": "Y",                  // 1-2 char fallback if no logo (used in FAB)
+    "primaryColor": "#1A73E8",         // Hex color for header, FAB, user bubbles
+    "logoUrl": "",                     // URL to newspaper logo image (optional)
+    "welcomeMessage": "నమస్కారం!",    // Welcome message in Telugu (defaultLanguage = "te")
+    "welcomeMessageEn": "Hello!"       // Welcome message in English
+  },
+  "languages": ["te", "en"],          // Supported languages — "te" = Telugu, "en" = English
+  "defaultLanguage": "te",            // Language used on first open
+  "sections": [                        // News sections available in this paper
+    "National", "State", "International", "Sports", "Business", "Entertainment"
+  ],
+  "contentSource": {
+    "type": "rss",                     // One of: "rss" | "api" | "pdf" | "scrape"
+    "url": "https://yourpaper.com/rss.xml",  // For type "rss"
+    // "endpoint": "https://cms.yourpaper.com/api/today",  // For type "api"
+    // "apiKey": "CMS_API_KEY",        // For type "api" if auth required
+    // "pdfUrl": "https://yourpaper.com/today.pdf",        // For type "pdf"
+    // "scrapeUrl": "https://yourpaper.com",               // For type "scrape"
+    // "selectors": {                  // For type "scrape" — CSS selectors
+    //   "headline": "h2.story-title",
+    //   "summary": "p.story-summary",
+    //   "section": ".category-label"
+    // }
+  },
+  "anthropicApiKey": "REPLACE_WITH_ANTHROPIC_KEY",  // Your Anthropic API key
+  "position": "bottom-right"          // "bottom-right" or "bottom-left"
+}

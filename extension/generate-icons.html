@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<!-- Open this file in Chrome, it will auto-download icon16.png, icon48.png, icon128.png -->
+<html>
+<head><title>Generate Icons</title></head>
+<body>
+<p>Generating icons... Check your Downloads folder.</p>
+<canvas id="c" style="display:none"></canvas>
+<script>
+  function makeIcon(size) {
+    const canvas = document.getElementById('c');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    // Background circle
+    ctx.beginPath();
+    ctx.arc(size/2, size/2, size/2, 0, Math.PI*2);
+    ctx.fillStyle = '#C0392B';
+    ctx.fill();
+
+    // Letter "N"
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.round(size * 0.55)}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('N', size/2, size/2 + size*0.04);
+
+    canvas.toBlob(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `icon${size}.png`;
+      a.click();
+    }, 'image/png');
+  }
+
+  [16, 48, 128].forEach((s, i) => setTimeout(() => makeIcon(s), i * 300));
+</script>
+</body>
+</html>

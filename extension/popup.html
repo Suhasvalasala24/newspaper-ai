@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>News AI Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 300px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      font-size: 13px; background: #fff; color: #222;
+    }
+    .header {
+      background: #C0392B; color: white;
+      padding: 14px 16px; display: flex; align-items: center; gap: 10px;
+    }
+    .header-avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: rgba(255,255,255,0.25);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px;
+    }
+    .header-title { font-weight: 600; font-size: 14px; }
+    .header-sub   { font-size: 11px; opacity: 0.85; }
+
+    .body { padding: 16px; }
+
+    /* Status banner */
+    .status-banner {
+      border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
+      font-size: 12px; line-height: 1.5; display: flex; align-items: center; gap: 8px;
+    }
+    .status-banner.ready   { background: #e8f5e9; border: 1px solid #a5d6a7; color: #2e7d32; }
+    .status-banner.missing { background: #fff3e0; border: 1px solid #ffcc80; color: #e65100; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* Key form */
+    .section-label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+      color: #888; font-weight: 600; margin-bottom: 6px;
+    }
+    .key-row { display: flex; gap: 6px; margin-bottom: 4px; }
+    .key-input {
+      flex: 1; border: 1.5px solid #ddd; border-radius: 6px;
+      padding: 8px 10px; font-size: 12px; font-family: monospace;
+      outline: none; transition: border-color 0.15s; background: #fafafa;
+    }
+    .key-input:focus { border-color: #C0392B; background: #fff; }
+    .save-btn {
+      background: #C0392B; color: #fff; border: none; border-radius: 6px;
+      padding: 8px 14px; font-size: 12px; cursor: pointer; font-weight: 600;
+      transition: background 0.15s;
+    }
+    .save-btn:hover  { background: #a93226; }
+    .save-btn.saving { background: #888; cursor: default; }
+
+    .feedback {
+      font-size: 11px; min-height: 16px; margin-bottom: 10px;
+      padding: 0 2px; font-weight: 600;
+    }
+    .feedback.ok  { color: #2e7d32; }
+    .feedback.err { color: #c62828; }
+
+    .key-hint { font-size: 11px; color: #888; margin-bottom: 16px; line-height: 1.5; }
+    .key-hint a { color: #C0392B; text-decoration: none; }
+    .key-hint a:hover { text-decoration: underline; }
+
+    .provider-tag {
+      display: inline-block; font-size: 11px; font-weight: 600;
+      color: #1a73e8; background: #e8f0fe; border-radius: 4px;
+      padding: 2px 7px; margin-bottom: 8px; min-height: 18px;
+    }
+
+    /* Sites */
+    .sites-label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+      color: #888; font-weight: 600; margin-bottom: 8px;
+    }
+    .site-list { list-style: none; display: flex; flex-direction: column; gap: 7px; margin-bottom: 4px; }
+    .site-list li { display: flex; align-items: center; gap: 8px; }
+    .site-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .site-link { color: #C0392B; text-decoration: none; font-size: 12px; }
+    .site-link:hover { text-decoration: underline; }
+
+    .footer {
+      padding: 10px 16px; border-top: 1px solid #eee;
+      text-align: center; font-size: 11px; color: #aaa; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-avatar">ఈ</div>
+  <div>
+    <div class="header-title">Eenadu AI Assistant</div>
+    <div class="header-sub">Gemini · Groq · Free</div>
+  </div>
+</div>
+
+<div class="body">
+
+  <div class="status-banner missing" id="status-banner">
+    <span class="status-dot" id="status-dot" style="background:#ffa726"></span>
+    <span id="status-text">Loading...</span>
+  </div>
+
+  <div class="section-label">API Key (Gemini or Groq)</div>
+  <div class="key-row">
+    <input
+      type="text"
+      class="key-input"
+      id="key-input"
+      placeholder="AIza… (Gemini) or gsk_… (Groq)"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+    />
+    <button class="save-btn" id="save-btn">Save</button>
+  </div>
+  <div class="feedback" id="feedback"></div>
+  <div id="provider-tag" class="provider-tag"></div>
+  <div class="key-hint">
+    <strong>Gemini (recommended):</strong> free key at
+    <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a>
+    — better Telugu, 1500 req/day<br>
+    <strong>Groq (fallback):</strong>
+    <a href="https://console.groq.com" target="_blank">console.groq.com</a>
+    — faster, 6000 TPM
+  </div>
+
+  <div class="sites-label">Supported sites</div>
+  <ul class="site-list">
+    <li>
+      <span class="site-dot" style="background:#4caf50"></span>
+      <a class="site-link" href="https://www.eenadu.net" target="_blank">eenadu.net</a>
+      <span style="font-size:11px;color:#aaa;margin-left:auto">Active ✓</span>
+    </li>
+    <li>
+      <span class="site-dot" style="background:#bdbdbd"></span>
+      <span style="color:#bbb;font-size:12px">thehindu.com — coming soon</span>
+    </li>
+    <li>
+      <span class="site-dot" style="background:#bdbdbd"></span>
+      <span style="color:#bbb;font-size:12px">deccanchronicle.com — coming soon</span>
+    </li>
+  </ul>
+
+</div>
+
+<div class="footer">NewsAI v1.1 · <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#C0392B;text-decoration:none">Get free Gemini key</a></div>
+
+<script src="popup.js"></script>
+
+</body>
+</html>
