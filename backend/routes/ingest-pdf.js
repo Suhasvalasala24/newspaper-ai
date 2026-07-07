@@ -3,6 +3,26 @@
 const fetch  = require('node-fetch');
 const pdf    = require('pdf-parse');
 
+// Max PDF size: 25 MB — prevents memory exhaustion from huge files
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Validates that a URL is safe to fetch (blocks SSRF: private IPs, metadata endpoints).
+ */
+function isSafeUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return false;
+    if (h === '169.254.169.254' || h === 'metadata.google.internal') return false;
+    if (/^10\./.test(h) || /^192\.168\./.test(h)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
+    if (h.endsWith('.internal') || h.endsWith('.local')) return false;
+    return true;
+  } catch (_) { return false; }
+}
+
 /**
  * POST /api/ingest-pdf
  * Body: { pdfUrl: string }
@@ -19,11 +39,18 @@ async function ingestPdf(req, res) {
     return res.status(400).json({ error: 'pdfUrl is required' });
   }
 
+  if (!isSafeUrl(pdfUrl)) {
+    return res.status(400).json({ error: 'Invalid or unsafe PDF URL' });
+  }
+
   let pdfBuffer;
   try {
-    const response = await fetch(pdfUrl, { timeout: 30000 });
+    const response = await fetch(pdfUrl, { timeout: 30000, size: MAX_PDF_BYTES });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     pdfBuffer = await response.buffer();
+    if (pdfBuffer.length > MAX_PDF_BYTES) {
+      return res.status(413).json({ error: `PDF too large (max ${MAX_PDF_BYTES / 1024 / 1024} MB)` });
+    }
   } catch (err) {
     return res.status(400).json({ error: `Could not fetch PDF: ${err.message}` });
   }

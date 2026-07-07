@@ -2,20 +2,60 @@
 
 const express = require('express');
 const cors    = require('cors');
+const path          = require('path');
 const { ingestPdf } = require('./routes/ingest-pdf');
 const { scrape }    = require('./routes/scrape');
 const { tts }       = require('./routes/tts');
+const { ingestArticle, getToday, resetToday, loadSample } = require('./routes/ingest');
+const { queryArticles } = require('./routes/query');
+const { embedArticles, embedStatus } = require('./routes/embed');
+const { translate, translateBatch } = require('./routes/translate');
+const { ingestToday, briefingStatus } = require('./routes/ingest-today');
+const { chat, listSections }          = require('./routes/chat');
+const { ingestXML, pollXML, pollStatus } = require('./routes/xml-ingest');
+const { prefetchTTS, serveCache, cacheStatus } = require('./routes/tts-prefetch');
+const { rateLimiter } = require('./middleware/rate-limiter');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
+// ── Trust reverse-proxy headers (needed for correct req.ip behind Nginx/Caddy) ──
+// Without this, rate limiter sees the proxy's IP for all clients.
+app.set('trust proxy', 1);
+
+// ── Security headers ────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('X-XSS-Protection', '1; mode=block');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Only allow embedding on the newspaper's own domain (loosened when needed via config)
+  res.set('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'");
+  next();
+});
+
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: '*', // Allow widget to call from any newspaper domain
-  methods: ['GET', 'POST'],
+  origin: '*', // Widget embeds on any newspaper domain — CORS must stay open
+  methods: ['GET', 'POST', 'DELETE'], // DELETE needed for /api/articles/reset
 }));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// ── Rate limiting — 60 req/hr per IP on all /api routes ──────────────────
+app.use('/api', rateLimiter);
+
+// ── Admin token guard — protects destructive/management endpoints ─────────
+// Set ADMIN_SECRET env var in production. Without it (local dev), all pass.
+function requireAdmin(req, res, next) {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) return next(); // dev mode: no secret configured = open
+  const token = req.headers['x-admin-token'] || req.query.adminToken;
+  if (token !== secret) {
+    return res.status(401).json({ error: 'Unauthorized — admin token required' });
+  }
+  next();
+}
 
 // ── Health check ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -45,16 +85,114 @@ app.get('/api/scrape', scrape);
 app.post('/api/tts', tts);
 
 /**
+ * POST /api/ingest           — add one article to today's edition
+ * GET  /api/articles/today   — list all today's articles + stats
+ * DELETE /api/articles/reset — clear today's edition
+ * POST /api/articles/sample  — load sample Sakshi articles for demo
+ */
+app.post('/api/ingest',                     ingestArticle);
+app.get('/api/articles/today',             getToday);
+app.delete('/api/articles/reset', requireAdmin, resetToday);  // destructive — admin token in prod
+app.post('/api/articles/sample',  requireAdmin, loadSample);  // management — admin token in prod
+
+/**
+ * POST /api/query
+ * Body: { question: string, topN?: number }
+ * Returns the top N most relevant articles for the question (keyword-scored).
+ * Widget uses this to send focused context instead of all articles.
+ */
+app.post('/api/query', queryArticles);
+
+/**
+ * POST /api/embed        — batch-embed all articles via HuggingFace (background)
+ * GET  /api/embed/status — embedding coverage stats
+ * Called by newsai-content.js after articles are ingested.
+ * Uses: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (free, Telugu-aware)
+ */
+app.post('/api/embed',        embedArticles);
+app.get('/api/embed/status',  embedStatus);
+
+/**
+ * POST /api/translate        — translate one text block to Telugu
+ * POST /api/translate/batch  — translate content field of multiple articles
+ * Uses Meta NLLB-200 via HuggingFace free Inference API (no billing required).
+ * Set HF_API_KEY env var for faster warm starts.
+ */
+app.post('/api/translate',       translate);
+app.post('/api/translate/batch', translateBatch);
+
+/**
+ * POST /api/ingest-today
+ * Body: { articles: [...] }   — full scraped array from newsai-content.js
+ * Fetches complete body text for ALL articles in parallel, saves to disk.
+ * Idempotent: skips if today's briefing already exists. Use ?force=1 to re-ingest.
+ *
+ * GET /api/briefing/status — check if today's briefing is ready
+ */
+app.post('/api/ingest-today',    ingestToday);
+app.get('/api/briefing/status',  briefingStatus);
+
+/**
+ * POST /api/chat
+ * Body: { question: string }
+ * Returns { context, section, source, articleCount, total, date }
+ * context is null when no briefing exists → widget falls back to DOM content.
+ *
+ * GET /api/chat/sections — list available sections in today's briefing
+ */
+app.post('/api/chat',          chat);
+app.get('/api/chat/sections',  listSections);
+
+/**
+ * POST /api/ingest-xml       — parse XML string (Sakshi CMS, RSS, Atom) and ingest articles
+ * POST /api/poll-xml         — fetch XML from a remote URL + optional auto-poll schedule
+ * GET  /api/poll-xml/status  — last poll time and article count
+ */
+app.post('/api/ingest-xml',     ingestXML);
+app.post('/api/poll-xml',       pollXML);
+app.get('/api/poll-xml/status', pollStatus);
+
+/**
+ * POST /api/tts/prefetch      — pre-generate TTS audio for all articles (background, fire-and-forget)
+ * GET  /api/tts/cache/status  — cache coverage (cached / total / %)
+ * GET  /api/tts/cache/:id     — serve cached MP3 audio for article ID (zero-latency playback)
+ */
+app.post('/api/tts/prefetch',    prefetchTTS);
+app.get('/api/tts/cache/status', cacheStatus);
+app.get('/api/tts/cache/:id',    serveCache);
+
+/**
+ * GET /portal — serve the ingestion portal UI
+ */
+app.use('/portal', express.static(path.join(__dirname, '..', 'portal')));
+
+/**
  * GET /api/rss?url=https://newspaper.com/rss.xml
  * Server-side RSS proxy — avoids CORS issues on the browser side.
  */
+function isSafeUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return false;
+    if (h === '169.254.169.254' || h === 'metadata.google.internal') return false;
+    if (/^10\./.test(h) || /^192\.168\./.test(h)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
+    if (h.endsWith('.internal') || h.endsWith('.local')) return false;
+    return true;
+  } catch (_) { return false; }
+}
+
 app.get('/api/rss', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: 'url param required' });
+  if (!isSafeUrl(url)) return res.status(400).json({ error: 'Invalid or unsafe URL' });
 
   try {
     const fetch = require('node-fetch');
-    const resp  = await fetch(url, { timeout: 10000 });
+    // Cap response at 5 MB to prevent memory exhaustion
+    const resp  = await fetch(url, { timeout: 10000, size: 5 * 1024 * 1024 });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const xml = await resp.text();
     res.set('Content-Type', 'application/xml').send(xml);
@@ -69,6 +207,33 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ── Midnight IST article store reset ─────────────────────────────────────────
+// Clears yesterday's articles so today's XML/scrape poll starts fresh each day.
+// IST = UTC+5:30. Runs once at midnight and re-schedules itself for the next night.
+function scheduleMidnightReset() {
+  const nowUtc   = Date.now();
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIst   = new Date(nowUtc + IST_OFFSET_MS);
+  // Next midnight IST
+  const midIst   = new Date(nowIst);
+  midIst.setHours(24, 0, 5, 0); // 00:00:05 IST next day (5s buffer)
+  const msLeft   = midIst - nowIst;
+
+  setTimeout(() => {
+    const { resetArticles } = require('./store/articleStore');
+    if (typeof resetArticles === 'function') {
+      resetArticles();
+      console.log('[NewsAI] 🌙 Midnight IST — article store reset for new edition');
+    }
+    scheduleMidnightReset(); // reschedule for next midnight
+  }, msLeft).unref();
+
+  const hh = Math.floor(msLeft / 3600000);
+  const mm = Math.floor((msLeft % 3600000) / 60000);
+  console.log(`[NewsAI] Midnight IST reset scheduled in ${hh}h ${mm}m`);
+}
+scheduleMidnightReset();
+
 // ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`NewsAI backend running on http://localhost:${PORT}`);
@@ -77,6 +242,20 @@ app.listen(PORT, () => {
   console.log('  GET  /api/scrape      — Web scraping proxy');
   console.log('  GET  /api/rss         — RSS CORS proxy');
   console.log('  POST /api/tts         — Edge TTS neural voice (pip install edge-tts)');
+  console.log('  POST /api/ingest      — Add article to today\'s edition');
+  console.log('  GET  /api/articles/today — List today\'s articles');
+  console.log('  POST /api/query       — RAG: keyword + HuggingFace semantic search');
+  console.log('  POST /api/embed       — batch-embed articles via HF (background)');
+  console.log('  GET  /api/embed/status — embedding coverage stats');
+  console.log('  POST /api/ingest-today   — Ingest full article set with body text (once/day)');
+  console.log('  GET  /api/briefing/status — Check if today\'s briefing is ready');
+  console.log('  POST /api/chat        — Get context string for a user question');
+  console.log('  GET  /api/chat/sections — List available sections in today\'s briefing');
+  console.log('  POST /api/ingest-xml  — Parse XML (Sakshi CMS/RSS/Atom) and ingest articles');
+  console.log('  POST /api/poll-xml    — Fetch + auto-poll XML from remote URL');
+  console.log('  POST /api/tts/prefetch — Pre-generate TTS audio for all articles (background)');
+  console.log('  GET  /api/tts/cache/:id — Serve cached TTS audio (zero-latency playback)');
+  console.log('  GET  /portal          — Content ingestion portal UI');
 });
 
 module.exports = app;

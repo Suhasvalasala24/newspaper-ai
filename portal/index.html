@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sakshi NewsAI — Content Portal</title>
+<style>
+  :root {
+    --bg:        #0D1B2A;
+    --surface:   #162435;
+    --surface2:  #1E3248;
+    --border:    #2A4A6B;
+    --accent:    #E8890C;
+    --accent2:   #F5A623;
+    --green:     #27AE60;
+    --red:       #E74C3C;
+    --text:      #E8F0F8;
+    --text2:     #8BACC8;
+    --radius:    12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* ── Header ── */
+  .header {
+    background: var(--surface);
+    border-bottom: 2px solid var(--accent);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header-left { display: flex; align-items: center; gap: 14px; }
+  .logo { width: 44px; height: 44px; background: var(--accent); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 900; color: #fff; }
+  .header h1 { font-size: 20px; font-weight: 700; }
+  .header h1 span { color: var(--accent); }
+  .header-sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .status-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border);
+    padding: 8px 16px; border-radius: 20px; font-size: 13px;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 2s infinite; }
+  .status-dot.ready { background: var(--green); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── Stats Bar ── */
+  .stats-bar {
+    display: flex; gap: 16px; padding: 20px 32px;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .stat-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 14px 20px; min-width: 130px;
+    text-align: center; flex-shrink: 0;
+  }
+  .stat-card .num { font-size: 28px; font-weight: 800; color: var(--accent); }
+  .stat-card .lbl { font-size: 11px; color: var(--text2); margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card.total .num { color: var(--accent2); }
+
+  /* ── Main Layout ── */
+  .main { display: grid; grid-template-columns: 400px 1fr; gap: 0; height: calc(100vh - 145px); }
+
+  /* ── Left Panel — Upload Form ── */
+  .form-panel {
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 24px; overflow-y: auto;
+  }
+  .panel-title {
+    font-size: 13px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--accent); margin-bottom: 20px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+  .form-group input, .form-group textarea, .form-group select {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 10px 14px;
+    font-size: 14px; font-family: inherit; outline: none; transition: border-color .2s;
+  }
+  .form-group input:focus, .form-group textarea:focus, .form-group select:focus { border-color: var(--accent); }
+  .form-group textarea { resize: vertical; min-height: 100px; }
+  .form-group select option { background: var(--surface2); }
+
+  /* Tags */
+  .tag-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tag-btn {
+    padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--surface2); color: var(--text2);
+    cursor: pointer; transition: all .15s;
+  }
+  .tag-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Buttons */
+  .btn {
+    width: 100%; padding: 12px; border-radius: 8px; border: none;
+    font-size: 14px; font-weight: 700; cursor: pointer; transition: all .15s;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent2); }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-danger { background: transparent; color: var(--red); border: 1px solid var(--red); }
+  .btn-danger:hover { background: var(--red); color: #fff; }
+  .btn-green { background: var(--green); color: #fff; }
+  .btn-sm { padding: 8px 16px; width: auto; font-size: 12px; }
+  .btn-row { display: flex; gap: 10px; margin-top: 12px; }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+  /* ── Right Panel — Article List ── */
+  .list-panel { padding: 24px; overflow-y: auto; }
+  .list-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .list-header h2 { font-size: 16px; font-weight: 700; }
+  .empty-state {
+    text-align: center; padding: 60px 20px; color: var(--text2);
+  }
+  .empty-state .emoji { font-size: 48px; margin-bottom: 12px; }
+  .empty-state p { font-size: 14px; line-height: 1.6; }
+
+  /* Article Card */
+  .article-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 12px;
+    transition: border-color .2s;
+  }
+  .article-card:hover { border-color: var(--accent); }
+  .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .card-title { font-size: 14px; font-weight: 600; line-height: 1.4; flex: 1; }
+  .card-id { font-size: 11px; color: var(--text2); flex-shrink: 0; }
+  .card-meta { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .section-badge {
+    font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px;
+    background: var(--accent); color: #fff; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .tag-chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+  }
+  .card-preview { font-size: 12px; color: var(--text2); margin-top: 8px; line-height: 1.5; }
+
+  /* Success toast */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; z-index: 999;
+    background: var(--green); color: #fff; padding: 12px 20px;
+    border-radius: 8px; font-size: 14px; font-weight: 600;
+    transform: translateY(80px); transition: transform .3s; pointer-events: none;
+  }
+  .toast.show { transform: translateY(0); }
+
+  /* Ready banner */
+  .ready-banner {
+    background: linear-gradient(135deg, #1a4d2a, #16392d);
+    border: 1px solid var(--green); border-radius: var(--radius);
+    padding: 16px 20px; margin-bottom: 20px;
+    display: none; align-items: center; gap: 12px;
+  }
+  .ready-banner.show { display: flex; }
+  .ready-banner .icon { font-size: 24px; }
+  .ready-banner .text { flex: 1; }
+  .ready-banner .text strong { display: block; font-size: 14px; color: var(--green); }
+  .ready-banner .text span { font-size: 12px; color: #7fc99a; }
+
+  /* Section colors */
+  .sec-Sports     { background: #1a4fa0 !important; }
+  .sec-Telangana  { background: #7d3a0a !important; }
+  .sec-National   { background: #5a2d82 !important; }
+  .sec-Cinema     { background: #8a1a4d !important; }
+  .sec-Business   { background: #0a5a3a !important; }
+  .sec-Education  { background: #2d5a0a !important; }
+  .sec-Health, .sec-PublicHealth { background: #0a4a5a !important; }
+  .sec-Crime      { background: #5a1a1a !important; }
+  .sec-AP, .sec-AndhraPradesh { background: #3a4a0a !important; }
+  .sec-International { background: #1a3a5a !important; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">స</div>
+    <div>
+      <h1>Sakshi <span>NewsAI</span> — Content Portal</h1>
+      <div class="header-sub">Daily Article Ingestion &amp; AI Readiness Dashboard</div>
+    </div>
+  </div>
+  <div class="status-pill">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">No articles loaded</span>
+  </div>
+</header>
+
+<!-- Stats Bar -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat-card total">
+    <div class="num" id="totalCount">0</div>
+    <div class="lbl">Total Articles</div>
+  </div>
+  <div id="sectionStats"></div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Left: Upload Form -->
+  <div class="form-panel">
+    <div class="panel-title">➕ Add Article</div>
+
+    <div class="form-group">
+      <label>Article Headline *</label>
+      <input type="text" id="artTitle" placeholder="Enter article headline in Telugu or English..." />
+    </div>
+
+    <div class="form-group">
+      <label>Section *</label>
+      <select id="artSection">
+        <option value="">— Select section —</option>
+        <option>Telangana</option>
+        <option>Andhra Pradesh</option>
+        <option>National</option>
+        <option>International</option>
+        <option>Sports</option>
+        <option>Business</option>
+        <option>Cinema</option>
+        <option>Education</option>
+        <option>Public Health</option>
+        <option>Crime & Police</option>
+        <option>Agriculture</option>
+        <option>Technology</option>
+        <option>Politics</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Tags (click to select)</label>
+      <div class="tag-grid" id="tagGrid">
+        <button class="tag-btn" data-tag="#sports">sports</button>
+        <button class="tag-btn" data-tag="#cricket">cricket</button>
+        <button class="tag-btn" data-tag="#ipl">ipl</button>
+        <button class="tag-btn" data-tag="#politics">politics</button>
+        <button class="tag-btn" data-tag="#telangana">telangana</button>
+        <button class="tag-btn" data-tag="#hyderabad">hyderabad</button>
+        <button class="tag-btn" data-tag="#andhra">andhra</button>
+        <button class="tag-btn" data-tag="#national">national</button>
+        <button class="tag-btn" data-tag="#modi">modi</button>
+        <button class="tag-btn" data-tag="#budget">budget</button>
+        <button class="tag-btn" data-tag="#cinema">cinema</button>
+        <button class="tag-btn" data-tag="#tollywood">tollywood</button>
+        <button class="tag-btn" data-tag="#business">business</button>
+        <button class="tag-btn" data-tag="#market">market</button>
+        <button class="tag-btn" data-tag="#education">education</button>
+        <button class="tag-btn" data-tag="#health">health</button>
+        <button class="tag-btn" data-tag="#crime">crime</button>
+        <button class="tag-btn" data-tag="#farmers">farmers</button>
+        <button class="tag-btn" data-tag="#weather">weather</button>
+        <button class="tag-btn" data-tag="#technology">technology</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Article Content</label>
+      <textarea id="artContent" placeholder="Paste article body text here (Telugu or English)..."></textarea>
+    </div>
+
+    <div class="form-group">
+      <label>Article URL (optional)</label>
+      <input type="url" id="artUrl" placeholder="https://sakshi.com/article/..." />
+    </div>
+
+    <button class="btn btn-primary" onclick="addArticle()">
+      ➕ Add Article
+    </button>
+
+    <hr class="divider" />
+
+    <div class="panel-title">⚡ Quick Actions</div>
+
+    <button class="btn btn-green" onclick="loadSample()" style="margin-bottom:10px">
+      📰 Load Today's Sample Edition (12 articles)
+    </button>
+    <button class="btn btn-secondary" onclick="translateAllToTelugu()" style="margin-bottom:10px" id="translateBtn">
+      🌐 Translate English Articles → Telugu
+    </button>
+    <button class="btn btn-secondary" onclick="refreshList()" style="margin-bottom:10px">
+      🔄 Refresh Article List
+    </button>
+    <button class="btn btn-danger" onclick="resetArticles()">
+      🗑️ Clear All — Start New Edition
+    </button>
+    <div id="translateStatus" style="font-size:12px;color:var(--text2);margin-top:8px;display:none"></div>
+  </div>
+
+  <!-- Right: Article List -->
+  <div class="list-panel">
+    <div id="readyBanner" class="ready-banner">
+      <div class="icon">✅</div>
+      <div class="text">
+        <strong>AI is Ready for Reader Queries</strong>
+        <span id="readySubtext">Articles ingested and indexed. Widget will use focused retrieval.</span>
+      </div>
+    </div>
+
+    <div class="list-header">
+      <h2>Today's Edition — <span id="articleCount">0</span> Articles</h2>
+      <div id="dateDisplay" style="font-size:13px;color:var(--text2)"></div>
+    </div>
+
+    <div id="articleList">
+      <div class="empty-state">
+        <div class="emoji">📰</div>
+        <p>No articles ingested yet.<br>Add articles using the form or click<br><strong>"Load Today's Sample Edition"</strong> for a demo.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = 'http://localhost:3001';
+let activeTags = new Set();
+
+// Tag toggle
+document.querySelectorAll('.tag-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tag = btn.dataset.tag;
+    if (activeTags.has(tag)) { activeTags.delete(tag); btn.classList.remove('active'); }
+    else { activeTags.add(tag); btn.classList.add('active'); }
+  });
+});
+
+// Auto-select tags when section changes
+document.getElementById('artSection').addEventListener('change', function () {
+  const map = {
+    'Sports':        ['#sports'],
+    'Telangana':     ['#telangana', '#hyderabad'],
+    'Andhra Pradesh':['#andhra'],
+    'National':      ['#national'],
+    'Cinema':        ['#cinema', '#tollywood'],
+    'Business':      ['#business', '#market'],
+    'Education':     ['#education'],
+    'Public Health': ['#health'],
+    'Crime & Police':['#crime'],
+    'Agriculture':   ['#farmers'],
+    'Technology':    ['#technology'],
+    'Politics':      ['#politics'],
+  };
+  activeTags = new Set();
+  document.querySelectorAll('.tag-btn').forEach(b => b.classList.remove('active'));
+  const auto = map[this.value] || [];
+  auto.forEach(tag => {
+    activeTags.add(tag);
+    document.querySelector(`[data-tag="${tag}"]`)?.classList.add('active');
+  });
+});
+
+async function addArticle() {
+  const title   = document.getElementById('artTitle').value.trim();
+  const section = document.getElementById('artSection').value;
+  const content = document.getElementById('artContent').value.trim();
+  const url     = document.getElementById('artUrl').value.trim();
+
+  if (!title) return showToast('❌ Please enter a headline', true);
+  if (!section) return showToast('❌ Please select a section', true);
+
+  try {
+    const resp = await fetch(`${API}/api/ingest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, section, tags: [...activeTags], content, url }),
+    });
+    const data = await resp.json();
+    if (data.error) return showToast('❌ ' + data.error, true);
+
+    // Reset form
+    document.getElementById('artTitle').value   = '';
+    document.getElementById('artSection').value = '';
+    document.getElementById('artContent').value = '';
+    document.getElementById('artUrl').value     = '';
+    activeTags = new Set();
+    document.querySelectorAll('.tag-btn').forEach(b => b.classList.remove('active'));
+
+    showToast('✅ Article added!');
+    updateStats(data.stats);
+    refreshList();
+  } catch (e) {
+    showToast('❌ Backend not running. Start with: cd backend && node server.js', true);
+  }
+}
+
+async function loadSample() {
+  try {
+    const resp = await fetch(`${API}/api/articles/sample`, { method: 'POST' });
+    const data = await resp.json();
+    showToast(`✅ Loaded ${data.count} sample articles!`);
+    updateStats(data.stats);
+    renderList(data.articles);
+  } catch (e) {
+    showToast('❌ Backend not running', true);
+  }
+}
+
+/**
+ * Translate all English-heavy article content to Telugu using
+ * Meta NLLB-200 via the HuggingFace free Inference API.
+ * This runs as a background task — articles are translated one at a time
+ * to avoid rate limits and the portal shows live progress.
+ */
+async function translateAllToTelugu() {
+  const statusEl = document.getElementById('translateStatus');
+  const btn = document.getElementById('translateBtn');
+
+  // Fetch current articles
+  let articles;
+  try {
+    const resp = await fetch(`${API}/api/articles/today`);
+    const data = await resp.json();
+    articles = data.articles || [];
+  } catch (e) {
+    showToast('❌ Could not fetch articles', true);
+    return;
+  }
+
+  if (!articles.length) {
+    showToast('⚠️ No articles to translate. Load sample articles first.', true);
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Translating...';
+  statusEl.style.display = 'block';
+
+  let translated = 0, skipped = 0, failed = 0;
+
+  for (let i = 0; i < articles.length; i++) {
+    const a = articles[i];
+    if (!a.content) { skipped++; continue; }
+
+    statusEl.textContent = `Translating ${i + 1}/${articles.length}: "${a.title.slice(0, 40)}..."`;
+
+    try {
+      const resp = await fetch(`${API}/api/translate`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ text: a.content }),
+      });
+
+      if (resp.status === 503) {
+        // Model cold start — wait and retry once
+        statusEl.textContent = `⏳ Translation model warming up (20s)...`;
+        await new Promise(r => setTimeout(r, 22000));
+        i--; continue; // retry this article
+      }
+
+      const data = await resp.json();
+      if (data.skipped) { skipped++; continue; } // already Telugu
+
+      // Re-ingest the article with translated content
+      await fetch(`${API}/api/ingest`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ ...a, content: data.translated }),
+      });
+      translated++;
+    } catch (e) {
+      failed++;
+      console.warn('Translate failed for', a.title, e);
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = '🌐 Translate English Articles → Telugu';
+  statusEl.style.display = 'none';
+
+  const msg = `✅ Translation done — ${translated} translated, ${skipped} already Telugu, ${failed} failed`;
+  showToast(msg);
+  refreshList();
+}
+
+async function refreshList() {
+  try {
+    const resp = await fetch(`${API}/api/articles/today`);
+    const data = await resp.json();
+    updateStats(data.stats);
+    renderList(data.articles);
+  } catch (e) {}
+}
+
+async function resetArticles() {
+  if (!confirm('Clear all articles and start a new edition?')) return;
+  try {
+    await fetch(`${API}/api/articles/reset`, { method: 'DELETE' });
+    updateStats({ total: 0, bySection: {} });
+    renderList([]);
+    showToast('🗑️ Articles cleared');
+  } catch (e) { showToast('❌ Backend not running', true); }
+}
+
+function updateStats(stats) {
+  document.getElementById('totalCount').textContent = stats.total;
+  document.getElementById('articleCount').textContent = stats.total;
+
+  // Status dot
+  const dot  = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const banner = document.getElementById('readyBanner');
+  if (stats.total > 0) {
+    dot.classList.add('ready');
+    text.textContent = `${stats.total} articles ready`;
+    banner.classList.add('show');
+    document.getElementById('readySubtext').textContent =
+      `${stats.total} articles indexed across ${Object.keys(stats.bySection).length} sections. AI will retrieve only relevant articles per query.`;
+  } else {
+    dot.classList.remove('ready');
+    text.textContent = 'No articles loaded';
+    banner.classList.remove('show');
+  }
+
+  // Section stat cards
+  const container = document.getElementById('sectionStats');
+  container.innerHTML = Object.entries(stats.bySection || {})
+    .sort((a,b) => b[1]-a[1])
+    .map(([sec, count]) => `
+      <div class="stat-card">
+        <div class="num" style="font-size:22px">${count}</div>
+        <div class="lbl">${sec}</div>
+      </div>
+    `).join('');
+}
+
+function renderList(articles) {
+  const list = document.getElementById('articleList');
+  if (!articles.length) {
+    list.innerHTML = `<div class="empty-state"><div class="emoji">📰</div><p>No articles ingested yet.<br>Add articles using the form or click<br><strong>"Load Today's Sample Edition"</strong> for a demo.</p></div>`;
+    return;
+  }
+
+  list.innerHTML = articles.map(a => {
+    const secClass = 'sec-' + a.section.replace(/[^a-zA-Z]/g,'');
+    const tags = a.tags.map(t => `<span class="tag-chip">${t}</span>`).join('');
+    const preview = a.content ? a.content.slice(0, 100) + (a.content.length > 100 ? '...' : '') : '';
+    return `
+      <div class="article-card">
+        <div class="card-header">
+          <div class="card-title">${a.title}</div>
+          <div class="card-id">#${a.id}</div>
+        </div>
+        <div class="card-meta">
+          <span class="section-badge ${secClass}">${a.section}</span>
+          ${tags}
+        </div>
+        ${preview ? `<div class="card-preview">${preview}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = isError ? '#e74c3c' : '#27ae60';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// Set date
+document.getElementById('dateDisplay').textContent = new Date().toLocaleDateString('en-IN', {
+  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+});
+
+// Load on start
+refreshList();
+</script>
+</body>
+</html>

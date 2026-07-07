@@ -20,5 +20,6 @@
   "groqApiKey": "REPLACE_WITH_GROQ_KEY",
   "llmProvider": "groq",
   "llmModel": "llama-3.1-8b-instant",
+  "huggingFaceApiKey": "REPLACE_WITH_HF_TOKEN",
   "position": "bottom-right"
 }

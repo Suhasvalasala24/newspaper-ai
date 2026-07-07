@@ -1,0 +1,45 @@
+{
+  "brand": {
+    "name": "సాక్షి AI",
+    "shortName": "సా",
+    "primaryColor": "#C0392B",
+    "logoUrl": "https://www.sakshi.com/themes/custom/sakshi/assets/images/logo.png",
+    "welcomeMessage": "నమస్కారం! నేను సాక్షి AI. ఈ రోజు వార్తలు, సినిమా, క్రీడలు అన్నీ అడగండి!",
+    "welcomeMessageEn": "Hello! I'm Sakshi AI. Ask me anything about today's edition!"
+  },
+  "languages": ["te", "en"],
+  "defaultLanguage": "te",
+  "sections": [
+    "తెలంగాణ", "ఆంధ్రప్రదేశ్", "జాతీయం", "అంతర్జాతీయం",
+    "క్రీడలు", "సినిమా", "వ్యాపారం", "కుటుంబం", "రాజకీయాలు", "నేరాలు"
+  ],
+  "sectionUrls": {
+    "తెలంగాణ": "https://www.sakshi.com/tags/telangana",
+    "ఆంధ్రప్రదేశ్": "https://www.sakshi.com/tags/andhra-pradesh",
+    "జాతీయం": "https://www.sakshi.com/national",
+    "అంతర్జాతీయం": "https://www.sakshi.com/international",
+    "క్రికెట్": "https://www.sakshi.com/sports/cricket",
+    "క్రీడలు": "https://www.sakshi.com/sports",
+    "సినిమా": "https://www.sakshi.com/cinema",
+    "టాలీవుడ్": "https://www.sakshi.com/tollywood",
+    "వ్యాపారం": "https://www.sakshi.com/business",
+    "కుటుంబం": "https://www.sakshi.com/family",
+    "రాజకీయాలు": "https://www.sakshi.com/politics",
+    "నేరాలు": "https://www.sakshi.com/crime",
+    "ఓటీటీ": "https://www.sakshi.com/ott"
+  },
+  "articleUrlTemplate": "https://www.sakshi.com/telugu-news/{section}/{slug}-{id}",
+  "contentSource": {
+    "type": "xml",
+    "url": "https://www.sakshi.com/rss.xml",
+    "pollIntervalMinutes": 30
+  },
+  "backendUrl": "http://localhost:3001",
+  "position": "bottom-right",
+  "_notes": {
+    "cms": "Drupal 10",
+    "articleUrlPattern": "https://www.sakshi.com/telugu-news/{section}/{english-slug}-{drupal-node-id}",
+    "sectionPagesWithTags": "Telangana and AP use /tags/ prefix; all other sections are direct paths",
+    "contentSourceNote": "When Sakshi XML is available, set type to xml and provide the feed URL. Use the /api/poll-xml endpoint with intervalMinutes to keep articles fresh."
+  }
+}

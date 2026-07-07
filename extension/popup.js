@@ -9,15 +9,16 @@ const providerTag  = document.getElementById('provider-tag');
 // Detect provider from key prefix
 function detectProvider(key) {
   if (!key) return null;
-  if (key.startsWith('AIza')) return 'gemini';
-  if (key.startsWith('gsk_')) return 'groq';
+  if (key.startsWith('AIza'))    return 'gemini';   // AI Studio API key
+  if (key.startsWith('AQ.'))     return 'gemini';   // Google OAuth2 access token
+  if (key.startsWith('gsk_'))    return 'groq';
   if (key.startsWith('sk-ant-')) return 'anthropic';
   return 'unknown';
 }
 
 function providerLabel(key) {
   const p = detectProvider(key);
-  if (p === 'gemini')    return '✨ Gemini 2.0 Flash';
+  if (p === 'gemini')    return '✨ Gemini 2.5 Flash-Lite';
   if (p === 'groq')      return '⚡ Groq (llama-3.1-8b)';
   if (p === 'anthropic') return '🤖 Claude (Anthropic)';
   return '❓ Unknown provider';
@@ -29,7 +30,7 @@ function setReady(key) {
     : key.slice(0, 4) + '••••';
   statusBanner.className = 'status-banner ready';
   statusDot.style.background = '#4caf50';
-  statusText.textContent = '✅ Key saved: ' + masked + ' — Visit eenadu.net to use the assistant.';
+  statusText.textContent = '✅ Key saved: ' + masked + ' — Visit eenadu.net or sakshi.com to use the assistant.';
   if (providerTag) providerTag.textContent = providerLabel(key);
   keyInput.value = key;
 }
@@ -37,7 +38,7 @@ function setReady(key) {
 function setMissing() {
   statusBanner.className = 'status-banner missing';
   statusDot.style.background = '#ffa726';
-  statusText.textContent = '⚠️ No API key saved. Get a free Gemini key at aistudio.google.com';
+  statusText.textContent = '⚠️ No API key saved. Get a Gemini key at aistudio.google.com/apikey';
   if (providerTag) providerTag.textContent = '';
   keyInput.value = '';
 }
@@ -61,16 +62,16 @@ saveBtn.addEventListener('click', function () {
     return;
   }
 
-  // Block Google OAuth tokens — "AQ." / "ya29." come from the wrong page in AI Studio
-  if (key.startsWith('AQ.') || key.startsWith('ya29.')) {
-    feedback.textContent = '❌ That\'s a Google OAuth token, not an API key. Go to aistudio.google.com/apikey → click "Create API key". Your key should start with "AIza".';
+  // Block only ya29. tokens (short-lived user credentials, wrong scope)
+  if (key.startsWith('ya29.')) {
+    feedback.textContent = '❌ That\'s a short-lived user credential. Use a service API key (AIza…) or an OAuth2 token (AQ.…) from aistudio.google.com/apikey instead.';
     feedback.className = 'feedback err';
     return;
   }
 
   const provider = detectProvider(key);
   if (provider === 'unknown') {
-    feedback.textContent = '❌ Key format not recognised. Gemini keys start with "AIza", Groq keys start with "gsk_". Please check and try again.';
+    feedback.textContent = '❌ Key format not recognised. Gemini keys start with "AIza" or "AQ.", Groq keys start with "gsk_".';
     feedback.className = 'feedback err';
     return;
   }
@@ -84,7 +85,7 @@ saveBtn.addEventListener('click', function () {
       feedback.textContent = '❌ Save failed: ' + chrome.runtime.lastError.message;
       feedback.className = 'feedback err';
     } else {
-      feedback.textContent = '✅ Saved! Refresh eenadu.net to activate.';
+      feedback.textContent = '✅ Saved! Refresh eenadu.net or sakshi.com to activate.';
       feedback.className = 'feedback ok';
       setReady(key);
     }

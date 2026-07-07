@@ -6,12 +6,16 @@
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": [
     "https://*.eenadu.net/*",
+    "https://*.sakshi.com/*",
     "https://*.thehindu.com/*",
     "https://*.deccanchronicle.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://*.eenadu.net/*"],
+      "matches": [
+        "https://*.eenadu.net/*",
+        "https://*.sakshi.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
@@ -34,7 +38,8 @@
         "widget/newsai-widget.css",
         "widget/newsai-config-loader.js",
         "widget/newsai-content.js",
-        "configs/eenadu.json"
+        "configs/eenadu.json",
+        "configs/sakshi.json"
       ],
       "matches": ["<all_urls>"]
     }

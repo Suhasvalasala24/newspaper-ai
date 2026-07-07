@@ -284,6 +284,25 @@
 .newsai-speak-btn.newsai-speaking { color: var(--newsai-primary); }
 .newsai-speak-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; }
 
+/* Copy button on bot bubbles */
+.newsai-copy-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--newsai-text-muted);
+  padding: 2px 4px;
+  margin-top: 3px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  opacity: 0.55;
+  transition: opacity 0.15s, color 0.15s;
+  line-height: 1;
+}
+.newsai-copy-btn:hover { opacity: 1; color: var(--newsai-primary); }
+.newsai-copy-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; }
+.newsai-copy-btn--copied { color: #22c55e !important; opacity: 1 !important; }
+
 /* Quick chips */
 .newsai-chips {
   display: flex;
@@ -323,6 +342,60 @@
   margin-bottom: 2px;
 }
 .newsai-news-card-headline { color: var(--newsai-text); font-weight: 500; }
+
+/* Section navigation strip — links to newspaper section pages */
+.newsai-section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--newsai-border);
+}
+.newsai-section-link {
+  text-decoration: none;
+  background: transparent;
+  border: 1px solid rgba(192, 57, 43, 0.3);
+  color: var(--newsai-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.newsai-section-link:hover { background: #fce4e4; border-color: var(--newsai-primary); }
+
+/* Next word suggestion bar — predictive input strip above the text field */
+.newsai-suggestions {
+  display: none;
+  overflow-x: auto;
+  gap: 5px;
+  padding: 5px 12px 3px;
+  scrollbar-width: none;
+  border-top: 1px solid var(--newsai-border);
+  background: var(--newsai-bg);
+}
+.newsai-suggestions::-webkit-scrollbar { display: none; }
+.newsai-suggestions.newsai-has-suggestions { display: flex; }
+.newsai-suggestion {
+  flex-shrink: 0;
+  background: #fff;
+  border: 1px solid var(--newsai-border);
+  color: var(--newsai-text-muted);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  white-space: nowrap;
+}
+.newsai-suggestion:hover {
+  background: #fce4e4;
+  color: var(--newsai-primary);
+  border-color: var(--newsai-primary);
+}
 
 /* Typing indicator */
 .newsai-typing {

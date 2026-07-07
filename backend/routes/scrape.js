@@ -3,9 +3,29 @@
 const fetch   = require('node-fetch');
 const cheerio = require('cheerio');
 
-// Simple in-memory cache (30-minute TTL)
-const CACHE = new Map();
-const CACHE_TTL_MS = 30 * 60 * 1000;
+// Simple in-memory cache (30-minute TTL, max 50 entries)
+const CACHE     = new Map();
+const CACHE_TTL_MS  = 30 * 60 * 1000;
+const CACHE_MAX = 50;
+
+/**
+ * Validates that a URL is safe to fetch from the server side.
+ * Blocks private IPs (SSRF), non-HTTP schemes, and cloud metadata endpoints.
+ */
+function isSafeUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    // Block loopback, link-local (AWS metadata), and RFC1918 private ranges
+    if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return false;
+    if (h === '169.254.169.254' || h === 'metadata.google.internal') return false;
+    if (/^10\./.test(h) || /^192\.168\./.test(h)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
+    if (h.endsWith('.internal') || h.endsWith('.local')) return false;
+    return true;
+  } catch (_) { return false; }
+}
 
 /**
  * GET /api/scrape?url=NEWSPAPER_URL
@@ -20,6 +40,10 @@ async function scrape(req, res) {
 
   if (!url) {
     return res.status(400).json({ error: 'url query param is required' });
+  }
+
+  if (!isSafeUrl(url)) {
+    return res.status(400).json({ error: 'Invalid or unsafe URL' });
   }
 
   // Check cache
@@ -45,6 +69,11 @@ async function scrape(req, res) {
 
   const articles = extractArticles(html, url);
 
+  // Evict oldest entry if cache is full (prevents unbounded memory growth)
+  if (CACHE.size >= CACHE_MAX) {
+    const oldest = [...CACHE.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    if (oldest) CACHE.delete(oldest[0]);
+  }
   CACHE.set(url, { articles, ts: Date.now() });
   res.json({ articles });
 }

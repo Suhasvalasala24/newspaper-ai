@@ -40,7 +40,7 @@ import edge_tts
 # ── Voice configuration ────────────────────────────────────────────────────────
 
 VOICES = {
-    'te':        'te-IN-MohanNeural',    # Telugu Male   (default)
+    'te':        'te-IN-ShrutiNeural',   # Telugu Female (default)
     'te-female': 'te-IN-ShrutiNeural',   # Telugu Female
     'en':        'en-IN-NeerjaNeural',   # English Female (default)
     'en-male':   'en-IN-PrabhatNeural',  # English Male

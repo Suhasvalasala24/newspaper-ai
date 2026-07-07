@@ -13,13 +13,15 @@
   'use strict';
 
   window.NewsAI = window.NewsAI || {};
+  window.NewsAI.sectionPagesReady = false; // set true when section pages postMessage arrives
 
   const BACKEND_URL = 'http://localhost:3001';
-  const MAX_FULL_ARTICLES = 5;    // full body for top enriched articles
-  const DEFAULT_CONTENT_CHARS = 2200; // Groq 6k TPM safe limit
-  const GEMINI_CONTENT_CHARS  = 6000; // Gemini has no TPM cap — more context
-  const ENRICH_COUNT = 5;
-  const MAX_BODY_CHARS = 200;     // more body text per article
+  const MAX_FULL_ARTICLES = 12;   // full body for top enriched articles
+  const DEFAULT_CONTENT_CHARS = 7000; // Increased: 7000 chars ensures all sections (Sports, Cinema) fit
+                                      // The widget's compact slice caps at 4000 for Groq requests
+  const GEMINI_CONTENT_CHARS  = 12000; // Gemini 2.0 Flash has 1M context — give it rich detail
+  const ENRICH_COUNT = 12;        // enrich top 12 articles with full body text
+  const MAX_BODY_CHARS = 600;     // 600 chars per article ≈ 4-5 sentences of real content
 
   const getContentBudget = () => (window.NewsAI && window.NewsAI.contentBudget) || DEFAULT_CONTENT_CHARS;
 
@@ -77,12 +79,31 @@
   /**
    * Fetches the full page for the top ENRICH_COUNT articles.
    * Extracts: full body text, journalist name, publication time.
+   * Then runs HuggingFace NLLB translation (via backend /api/translate) on any
+   * English-heavy body text so the AI has Telugu context for Telugu queries.
    * Silently updates window.NewsAI.todayContent when done — no UI disruption.
    */
   async function enrichArticlesInBackground(articles, config) {
-    const toEnrich = articles
-      .filter(a => a.url && a.url.startsWith('http') && !a.url.includes(window.location.hostname + '#'))
-      .slice(0, ENRICH_COUNT);
+    // Section-aware enrichment: take at least 2 articles from EACH section
+    // so that Sports/Cinema (which appear late in homepage order) always get body text.
+    // Without this, sports articles at position 15+ would be missed by a simple slice(0,12).
+    const eligible = articles.filter(a => a.url && a.url.startsWith('http') && !a.url.includes(window.location.hostname + '#'));
+    const bySection = {};
+    for (const a of eligible) {
+      const sec = a.section || 'General';
+      (bySection[sec] = bySection[sec] || []).push(a);
+    }
+    const selected = new Set();
+    // First pass: 2 per section to guarantee all sections are covered
+    for (const items of Object.values(bySection)) {
+      items.slice(0, 2).forEach(a => selected.add(a));
+    }
+    // Second pass: fill remaining slots with top articles (positional order)
+    for (const a of eligible) {
+      if (selected.size >= ENRICH_COUNT) break;
+      selected.add(a);
+    }
+    const toEnrich = [...selected].slice(0, ENRICH_COUNT);
 
     if (!toEnrich.length) return;
 
@@ -103,9 +124,180 @@
       }
     });
 
-    // Rebuild the context string with the enriched data
-    window.NewsAI.todayContent = buildContextString(articles, config);
+    // After enrichment, publishedAt is set on each enriched article.
+    // Now filter out articles that are definitively from an older day.
+    const beforeCount = articles.length;
+    const freshArticles = articles.filter(a => !isDefinitelyOldArticle(a));
+    const removedCount = beforeCount - freshArticles.length;
+    if (removedCount > 0) {
+      console.log(`[NewsAI] 📅 Date filter: removed ${removedCount} old article(s) — keeping ${freshArticles.length} from today.`);
+      window.NewsAI.articles = freshArticles;
+    }
+
+    // Rebuild context with enriched body text (on today-only articles)
+    window.NewsAI.todayContent = buildContextString(window.NewsAI.articles || articles, config);
     console.log(`[NewsAI] ✅ Enrichment done — ${enriched}/${toEnrich.length} articles got full text.`);
+
+    // Re-push to backend now that body text is available.
+    // Reset the count so ingestToBackend doesn't skip this call.
+    if (window.NewsAI && enriched > 0) {
+      window.NewsAI._backendIngestCount = 0;
+      ingestToBackend(window.NewsAI.articles || articles);
+    }
+
+    // ── HuggingFace contextual translation (optional, backend must be running) ──
+    // Translates English-heavy article bodies to Telugu via Meta NLLB-200.
+    // This gives the AI richer Telugu context even when article body is in English.
+    // Fires in background and updates todayContent again when complete.
+    translateEnglishBodies(articles, config);
+  }
+
+  /**
+   * Uses HuggingFace NLLB-200 (via backend /api/translate) to translate
+   * any English-heavy article body to Telugu for better AI context quality.
+   * Gracefully no-ops if backend is unreachable.
+   */
+  /**
+   * Translates English-heavy article bodies to Telugu for richer AI context.
+   *
+   * Two-tier strategy:
+   *   Tier 1: Backend /api/translate (localhost:3001) — batched, cached, fast on warm model
+   *   Tier 2: Direct HuggingFace Inference API — works without any backend, uses
+   *           config.huggingFaceApiKey (free HF account token, optional but faster)
+   *
+   * Falls back gracefully if both are unavailable.
+   */
+  async function translateEnglishBodies(articles, config) {
+    const englishArticles = articles.filter(a =>
+      a.body && a.body.length > 80 && isEnglishHeavy(a.body) && !a.bodyTe
+    ).slice(0, 5);
+
+    if (!englishArticles.length) return;
+
+    console.log(`[NewsAI HF] ${englishArticles.length} English articles to translate → Telugu`);
+
+    // Show translation status badge in widget if available
+    const statusEl = document.querySelector('.newsai-hf-status');
+    if (statusEl) { statusEl.textContent = '🔄 తెలుగులోకి అనువదిస్తున్నాం...'; statusEl.style.display = 'block'; }
+
+    let translated = 0;
+
+    for (const article of englishArticles) {
+      const text = article.body.slice(0, 1000);
+
+      // ── Tier 1: backend ───────────────────────────────────────────────────────
+      let done = false;
+      try {
+        const r = await fetch('http://localhost:3001/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, targetLang: 'te' }),
+          signal: AbortSignal.timeout(20000),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d.translated && !d.skipped) { article.bodyTe = d.translated; done = true; translated++; }
+        }
+      } catch (_) { /* backend not running — fall through */ }
+
+      if (done) continue;
+
+      // ── Tier 2: direct HuggingFace Inference API ─────────────────────────────
+      const hfKey = config?.huggingFaceApiKey || config?.hfApiKey;
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (hfKey) headers['Authorization'] = `Bearer ${hfKey}`;
+
+        const r = await fetch(
+          'https://api-inference.huggingface.co/models/facebook/nllb-200-distilled-600M',
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              inputs: text,
+              parameters: { src_lang: 'eng_Latn', tgt_lang: 'tel_Telu', max_new_tokens: 400 },
+            }),
+            signal: AbortSignal.timeout(30000),
+          }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          const bodyTe = d?.[0]?.translation_text;
+          if (bodyTe) { article.bodyTe = bodyTe; translated++; console.log(`[NewsAI HF] ✅ "${article.headline.slice(0, 50)}"`); }
+        } else if (r.status === 503) {
+          console.log('[NewsAI HF] Model loading — will be ready on next page load');
+          break; // don't hammer a cold model
+        }
+      } catch (_) { /* HF API unreachable — skip */ }
+    }
+
+    if (statusEl) statusEl.style.display = 'none';
+
+    if (translated > 0) {
+      window.NewsAI.todayContent = buildContextString(articles, config);
+      console.log(`[NewsAI HF] ✅ Context rebuilt — ${translated} articles translated`);
+    }
+  }
+
+  // ─── Date freshness filter ────────────────────────────────────────────────
+  /**
+   * Returns today's date as ISO string "YYYY-MM-DD" in local time.
+   */
+  function todayLocalISO() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  /**
+   * Returns true if the article is DEFINITIVELY from an older day.
+   * Returns false if the article is from today OR if we cannot determine the date
+   * (safe default = include).
+   *
+   * Checks two sources:
+   *   1. article.publishedAt  — ISO datetime set during enrichment (most reliable)
+   *   2. article.url          — URL may contain /YYYY/MM/DD/ or YYYYMMDD date pattern
+   *
+   * We only exclude if we can PROVE the article is old.
+   * Unknown date → include (never silently drop articles).
+   */
+  function isDefinitelyOldArticle(article) {
+    const today = todayLocalISO();  // "2026-06-28"
+
+    // ── Source 1: publishedAt (set by enrichment from <time datetime="..."> tag) ──
+    if (article.publishedAt) {
+      try {
+        const pubDate = new Date(article.publishedAt);
+        if (!isNaN(pubDate)) {
+          const pubISO = `${pubDate.getFullYear()}-${String(pubDate.getMonth() + 1).padStart(2, '0')}-${String(pubDate.getDate()).padStart(2, '0')}`;
+          return pubISO !== today;  // old if date differs
+        }
+      } catch (_) { /* ignore parse errors */ }
+    }
+
+    // ── Source 2: URL date patterns ──────────────────────────────────────────
+    const url = article.url || '';
+    // Pattern A: /YYYY/MM/DD/ → e.g. sakshi.com/news/sports/2026/06/27/...
+    const slashDate = today.replace(/-/g, '/');   // "2026/06/28"
+    const matchSlash = url.match(/\/(\d{4})\/(\d{2})\/(\d{2})\//);
+    if (matchSlash) {
+      const urlDate = `${matchSlash[1]}/${matchSlash[2]}/${matchSlash[3]}`;
+      return urlDate !== slashDate;  // definitive — URL has explicit date
+    }
+    // Pattern B: YYYYMMDD embedded in URL → e.g. .../20260627/...
+    const compactDate = today.replace(/-/g, '');  // "20260628"
+    const matchCompact = url.match(/\/(\d{8})\//);
+    if (matchCompact) {
+      return matchCompact[1] !== compactDate;
+    }
+
+    return false;  // can't determine date — include (safe default)
+  }
+
+  /** Simple heuristic: <20% Telugu script = English-heavy */
+  function isEnglishHeavy(text) {
+    if (!text || text.length < 20) return false;
+    const teluguChars = (text.match(/[ఀ-౿]/g) || []).length;
+    return teluguChars / text.length < 0.20;
   }
 
   /**
@@ -115,7 +307,7 @@
   async function fetchArticleDetail(article) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000); // 5 s max per article
+      const timeout = setTimeout(() => controller.abort(), 8000); // 8 s max per article
 
       const resp = await fetch(article.url, {
         signal: controller.signal,
@@ -131,10 +323,19 @@
       // ── Full body text ─────────────────────────────────────────────────────
       // Try progressively broader selectors common in Telugu/Indian news sites
       const bodySelectors = [
+        // Schema.org — works on any CMS that uses structured data (most modern sites)
+        '[itemprop="articleBody"]',
+        // Sakshi.com specific
+        '.sakshi-full-story', '.full-story', '.fullstory', '.story-full',
+        '[class*="full-story"]', '[class*="fullstory"]', '[class*="story-full"]',
+        '[class*="detail-content"]', '[class*="news-detail"]',
+        // Common Telugu/Indian news sites
         '.story-body', '.article-body', '.article-content', '.story-content',
         '[class*="story-detail"]', '[class*="article-detail"]', '[class*="story-text"]',
-        '[class*="content-body"]', '[class*="article-text"]',
-        'article .content', 'article p', '.post-content',
+        '[class*="content-body"]', '[class*="article-text"]', '[class*="news-body"]',
+        '.body-content', '.news-content', '.post-content', '.entry-content',
+        // Generic containers with substantial text
+        'article .content', '.post-content',
       ];
       let body = '';
       for (const sel of bodySelectors) {
@@ -292,10 +493,10 @@
   }
 
   // ─── Build context string for AI ──────────────────────────────────────────
-  // Format: bullet-per-article grouped by section — matches DIGEST/SECTION output format.
-  // Budget is dynamic: 2200 chars for Groq (6k TPM), 6000 for Gemini (no TPM cap).
+  // Format: bullet-per-article grouped by section.
+  // Budget is 7000 chars (covers all sections). Widget compact-mode slices at 4000 for Groq.
   function buildContextString(articles, config) {
-    if (!articles.length) return 'No articles loaded today.';
+    if (!articles.length) return '';  // empty string → widget shows "Content is loading" fallback
 
     const budget = getContentBudget();
     const newspaper = (config && config.brand && config.brand.name) || 'Eenadu';
@@ -303,34 +504,30 @@
     const sections = groupBySection(articles);
 
     let out = `${newspaper} | ${date} | ${articles.length} articles\n\n`;
-    let n = 0;
 
-    // Phase 1: bullet-per-article grouped by section
+    // Phase 1: headline per article grouped by section.
+    // No [N] numbers, no summary line — home-page summaries are truncated headlines
+    // and cause the AI to repeat the same sentence twice in its response.
+    const phase1Budget = budget * 0.80;
     for (const [section, items] of Object.entries(sections)) {
       out += `${section}:\n`;
       for (const a of items) {
-        n++;
-        a._n = n;
-        const summary = a.summary && a.summary.length > 10 ? a.summary.slice(0, 100) : '';
-        const line = summary
-          ? `• [${n}] ${a.headline.slice(0, 90)} — ${summary}\n`
-          : `• [${n}] ${a.headline.slice(0, 90)}\n`;
-        if (out.length + line.length > budget * 0.75) {
-          out += `(${articles.length - n} more articles not shown)\n`;
-          break;
-        }
+        const line = `• ${a.headline.slice(0, 120)}\n`;
+        if (out.length + line.length > phase1Budget) break;
         out += line;
+        if (a.url) out += `  ${a.url}\n`;
       }
       out += '\n';
-      if (out.includes('more articles not shown')) break;
     }
 
-    // Phase 2: full body text for enriched articles — enables DETAIL mode responses
-    const enriched = articles.filter(a => a.body && a.body.length > 50).slice(0, MAX_FULL_ARTICLES);
-    if (enriched.length && out.length < budget * 0.85) {
-      out += 'FULL TEXT:\n';
+    // Phase 2: full body text for enriched articles — enables detailed answers.
+    // Uses bodyTe (HuggingFace Telugu translation) when available; falls back to body.
+    const enriched = articles.filter(a => (a.body || a.bodyTe) && (a.body || a.bodyTe).length > 50).slice(0, MAX_FULL_ARTICLES);
+    if (enriched.length && out.length < budget * 0.98) {
+      out += '\nFULL TEXT:\n';
       for (const a of enriched) {
-        const entry = `[${a._n}] ${a.headline.slice(0, 70)}: ${a.body.slice(0, MAX_BODY_CHARS)}\n`;
+        const bodyText = (a.bodyTe || a.body || '').slice(0, MAX_BODY_CHARS);
+        const entry = `${a.headline.slice(0, 70)}: ${bodyText}\n`;
         if (out.length + entry.length > budget) break;
         out += entry;
       }
@@ -352,6 +549,72 @@
     return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  // ── Backend ingestion — fire-and-forget ──────────────────────────────────
+  /**
+   * POSTs the scraped articles to the local backend /api/ingest-today.
+   * The backend fetches FULL body text for ALL articles and saves to disk.
+   * This makes future queries use real article text, not scraped headlines.
+   *
+   * Fire-and-forget: never blocks the widget. If backend is offline → silent skip.
+   * Idempotent: backend skips if today's briefing already exists.
+   */
+  async function ingestToBackend(articles) {
+    // Only re-ingest when we have MORE articles than the last ingest
+    // (section pages arrive after Phase 1, 114 > 80 — we want the full set).
+    if (window.NewsAI._backendIngestCount && articles.length <= window.NewsAI._backendIngestCount) return;
+    window.NewsAI._backendIngestCount = articles.length;
+
+    try {
+      // Reset in-memory store so stale articles from a previous page-load don't linger
+      await fetch(`${BACKEND_URL}/api/articles/reset`, { method: 'DELETE' }).catch(() => {});
+
+      // Batch-ingest all articles in parallel — instant (in-memory, no body-fetching)
+      let ingested = 0;
+      await Promise.all(articles.map(async (a) => {
+        try {
+          const resp = await fetch(`${BACKEND_URL}/api/ingest`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              title:    a.headline || a.title || '',
+              section:  a.section  || 'General',
+              tags:     [a.section || 'General'],
+              content:  (a.body || a.bodyTe || a.summary || '').slice(0, 800),
+              url:      a.url  || '',
+              language: 'te',
+            }),
+          });
+          if (resp.ok) ingested++;
+        } catch (_) {}
+      }));
+
+      if (window.NewsAI) window.NewsAI.backendReady = true;
+      console.log(`[NewsAI] ✅ Backend: ingested ${ingested}/${articles.length} articles`);
+      const statsResp = await fetch(`${BACKEND_URL}/api/articles/today`).catch(() => null);
+      if (statsResp && statsResp.ok) {
+        const { stats } = await statsResp.json();
+        console.log('[NewsAI] Backend sections:', JSON.stringify(stats.bySection));
+      }
+
+      // ── Trigger HuggingFace semantic embedding (fire-and-forget) ──────────
+      // Embeds all article titles+content via sentence-transformers multilingual model.
+      // Runs in background on the backend — responds immediately with 202 Accepted.
+      // Once done, /api/query uses hybrid keyword+semantic search for Telugu queries
+      // that don't map to exact keyword matches (e.g. "India vs England ఫలితం?").
+      const cfg = window.NewsAI && window.NewsAI.config;
+      fetch(`${BACKEND_URL}/api/embed`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ hfApiKey: cfg && cfg.hfApiKey }),
+      }).then(r => r.json())
+        .then(d => console.log(`[NewsAI] 🔮 HF embed triggered: ${d.message}`))
+        .catch(() => {/* non-critical — keyword search still works */});
+    } catch (_) {
+      // Backend not running — widget will use DOM-scraped content (normal fallback)
+      console.log('[NewsAI] Backend not available — using DOM-scraped content.');
+    }
+  }
+
   // Expose
   window.NewsAI.loadContent = loadContent;
 
@@ -360,15 +623,30 @@
   // and posts the result here via window.postMessage (crosses isolated/main worlds).
   window.addEventListener('message', (event) => {
     if (!event.data || event.data.type !== 'NEWSAI_CONTENT_REFRESH') return;
-    const articles = event.data.articles || [];
+    let articles = event.data.articles || [];
     if (!articles.length || !window.NewsAI) return;
 
+    // Apply URL-based date filter — enrichment hasn't run yet at this point,
+    // so publishedAt isn't set; we rely on URL date patterns only.
+    // isDefinitelyOldArticle returns false (include) for URLs with no date pattern.
+    const before = articles.length;
+    articles = articles.filter(a => !isDefinitelyOldArticle(a));
+    if (articles.length < before) {
+      console.log(`[NewsAI] 📅 Phase 2 date filter: kept ${articles.length}/${before} articles from today's URLs.`);
+    }
+
     const config = (window.NewsAIConfig && window.NewsAIConfig.config) || {};
-    window.NewsAI.articles     = articles;
-    window.NewsAI.todayContent = buildContextString(articles, config);
+    window.NewsAI.articles        = articles;
+    window.NewsAI.todayContent    = buildContextString(articles, config);
+    window.NewsAI.sectionPagesReady = true; // unblocks section-specific queries in widget
     console.log(`[NewsAI] Content refreshed via postMessage: ${articles.length} articles`);
 
-    // Kick off background enrichment on the fresh set too
+    // ── Auto-ingest to backend (once per day) ────────────────────────────────
+    // Fire-and-forget: backend fetches full body text for ALL articles and
+    // saves to disk. Future queries use /api/chat which reads from that store.
+    ingestToBackend(articles);
+
+    // Kick off browser-side background enrichment in parallel
     enrichArticlesInBackground(articles, config);
   });
 })();
