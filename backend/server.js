@@ -1,5 +1,8 @@
 'use strict';
 
+// Load .env before any other require so process.env is populated
+require('dotenv').config();
+
 const express = require('express');
 const cors    = require('cors');
 const path          = require('path');
@@ -7,13 +10,17 @@ const { ingestPdf } = require('./routes/ingest-pdf');
 const { scrape }    = require('./routes/scrape');
 const { tts }       = require('./routes/tts');
 const { ingestArticle, getToday, resetToday, loadSample } = require('./routes/ingest');
-const { queryArticles } = require('./routes/query');
+const { queryArticles, clearQueryCache } = require('./routes/query');
 const { embedArticles, embedStatus } = require('./routes/embed');
 const { translate, translateBatch } = require('./routes/translate');
 const { ingestToday, briefingStatus } = require('./routes/ingest-today');
 const { chat, listSections }          = require('./routes/chat');
 const { ingestXML, pollXML, pollStatus } = require('./routes/xml-ingest');
-const { prefetchTTS, serveCache, cacheStatus } = require('./routes/tts-prefetch');
+const { prefetchTTS, serveCache, cacheStatus, clearAudioCache } = require('./routes/tts-prefetch');
+const { getCacheStatus: geminiCacheStatus, clearCache: clearGeminiCache } = require('./routes/gemini-cache');
+const { getChips, clearChips } = require('./routes/chips');
+const { getDigest, clearDigest } = require('./routes/digest');
+const { trackEvent, getSummary: getAnalyticsSummary, clearAnalytics } = require('./routes/analytics');
 const { rateLimiter } = require('./middleware/rate-limiter');
 
 const app  = express();
@@ -46,19 +53,32 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/api', rateLimiter);
 
 // ── Admin token guard — protects destructive/management endpoints ─────────
-// Set ADMIN_SECRET env var in production. Without it (local dev), all pass.
+// Set ADMIN_SECRET env var in production.
+// IMPORTANT: fails CLOSED if ADMIN_SECRET is unset — use NODE_ENV=development
+// explicitly to open admin access during local dev.
 function requireAdmin(req, res, next) {
   const secret = process.env.ADMIN_SECRET;
-  if (!secret) return next(); // dev mode: no secret configured = open
+  if (!secret) {
+    // Fail closed in production; open only when NODE_ENV=development is set explicitly
+    if (process.env.NODE_ENV === 'development') return next();
+    return res.status(503).json({
+      error: 'Admin endpoint disabled — set ADMIN_SECRET in backend/.env to enable',
+    });
+  }
   const token = req.headers['x-admin-token'] || req.query.adminToken;
-  if (token !== secret) {
+  // Constant-time comparison prevents timing attacks on the token
+  const secretBuf = Buffer.from(secret);
+  const tokenBuf  = Buffer.from(String(token || ''));
+  const safe = secretBuf.length === tokenBuf.length &&
+    require('crypto').timingSafeEqual(secretBuf, tokenBuf);
+  if (!safe) {
     return res.status(401).json({ error: 'Unauthorized — admin token required' });
   }
   next();
 }
 
-// ── Health check ────────────────────────────────────────────────────────────
-app.get('/', (req, res) => {
+// ── Health check (only for API clients that send Accept: application/json) ──
+app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'NewsAI Backend', version: '1.0.0' });
 });
 
@@ -162,9 +182,45 @@ app.get('/api/tts/cache/status', cacheStatus);
 app.get('/api/tts/cache/:id',    serveCache);
 
 /**
+ * GET /api/gemini-cache — active Gemini context cache ID (widget fetches at open)
+ */
+app.get('/api/gemini-cache', geminiCacheStatus);
+
+/**
+ * GET /api/chips — dynamic suggestion chips built from today's articles
+ */
+app.get('/api/chips', getChips);
+
+/**
+ * GET /api/digest — pre-generated Telugu + English daily digest
+ */
+app.get('/api/digest', getDigest);
+
+/**
+ * POST /api/analytics       — log an event (open, query, tts, lang_switch, article_click)
+ * GET  /api/analytics/summary — aggregated stats (admin-protected)
+ */
+app.post('/api/analytics',         trackEvent);
+app.get('/api/analytics/summary',  requireAdmin, getAnalyticsSummary);
+
+/**
  * GET /portal — serve the ingestion portal UI
  */
 app.use('/portal', express.static(path.join(__dirname, '..', 'portal')));
+
+/**
+ * GET /widget/* — serve widget JS/CSS files so the demo page can load them.
+ * Enables single-deployment: backend serves both the API and the widget assets.
+ */
+app.use('/widget', express.static(path.join(__dirname, '..', 'widget')));
+
+/**
+ * GET /demo — serve the widget demo/test page (works on mobile browser too).
+ * Alias: GET / also serves it so the root URL is usable.
+ */
+const demoPath = path.join(__dirname, '..', 'test.html');
+app.get('/demo', (req, res) => res.sendFile(demoPath));
+app.get('/', (req, res) => res.sendFile(demoPath));
 
 /**
  * GET /api/rss?url=https://newspaper.com/rss.xml
@@ -202,8 +258,9 @@ app.get('/api/rss', async (req, res) => {
 });
 
 // ── Global error handler ─────────────────────────────────────────────────────
+// Log full error server-side but NEVER echo stack traces or upstream URLs to client.
 app.use((err, req, res, _next) => {
-  console.error('[NewsAI Backend Error]', err);
+  console.error('[NewsAI Backend Error]', err.message, err.stack);
   res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -214,18 +271,37 @@ function scheduleMidnightReset() {
   const nowUtc   = Date.now();
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const nowIst   = new Date(nowUtc + IST_OFFSET_MS);
-  // Next midnight IST
+  // Next midnight IST — nowIst's UTC fields represent the IST wall clock, so we
+  // must use setUTCHours here. setHours() would apply the SERVER's local timezone,
+  // firing the reset at the wrong time on any non-UTC server (e.g. ~18:30 IST on an IST box).
   const midIst   = new Date(nowIst);
-  midIst.setHours(24, 0, 5, 0); // 00:00:05 IST next day (5s buffer)
+  midIst.setUTCHours(24, 0, 5, 0); // 00:00:05 IST next day (5s buffer)
   const msLeft   = midIst - nowIst;
 
   setTimeout(() => {
-    const { resetArticles } = require('./store/articleStore');
-    if (typeof resetArticles === 'function') {
-      resetArticles();
-      console.log('[NewsAI] 🌙 Midnight IST — article store reset for new edition');
+    try {
+      // Clear article store (main data)
+      const { resetArticles } = require('./store/articleStore');
+      if (typeof resetArticles === 'function') resetArticles();
+
+      // Clear audio cache — so stale article IDs don't serve yesterday's audio
+      clearAudioCache();
+
+      // Clear query response cache — yesterday's answers are invalid for today's articles
+      clearQueryCache();
+
+      // Clear new daily caches
+      clearGeminiCache();
+      clearChips();
+      clearDigest();
+      clearAnalytics();  // logs a midnight_reset event, doesn't wipe analytics
+
+      console.log('[NewsAI] 🌙 Midnight IST — article store + audio + query + gemini + chips + digest reset');
+    } catch (err) {
+      console.error('[NewsAI] Midnight reset failed:', err.message);
+    } finally {
+      scheduleMidnightReset(); // always reschedule, even if reset threw
     }
-    scheduleMidnightReset(); // reschedule for next midnight
   }, msLeft).unref();
 
   const hh = Math.floor(msLeft / 3600000);
@@ -241,7 +317,7 @@ app.listen(PORT, () => {
   console.log('  POST /api/ingest-pdf  — PDF text extraction');
   console.log('  GET  /api/scrape      — Web scraping proxy');
   console.log('  GET  /api/rss         — RSS CORS proxy');
-  console.log('  POST /api/tts         — Edge TTS neural voice (pip install edge-tts)');
+  console.log('  POST /api/tts         — Sarvam Bulbul v3 TTS (set SARVAM_API_KEY in .env)');
   console.log('  POST /api/ingest      — Add article to today\'s edition');
   console.log('  GET  /api/articles/today — List today\'s articles');
   console.log('  POST /api/query       — RAG: keyword + HuggingFace semantic search');

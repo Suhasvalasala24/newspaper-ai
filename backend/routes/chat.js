@@ -137,7 +137,10 @@ function buildContext(articles, section, date) {
 
 async function chat(req, res) {
   const { question } = req.body;
-  if (!question || !question.trim()) {
+  // typeof check: a non-string (number/object) would make .trim() throw inside an
+  // async handler — Express 4 doesn't catch that, and the unhandled rejection
+  // kills the Node process (a one-request DoS since CORS is open).
+  if (!question || typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'question is required' });
   }
 

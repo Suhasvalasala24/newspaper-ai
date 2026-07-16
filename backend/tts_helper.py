@@ -4,10 +4,11 @@ Usage: python3 tts_helper.py <voice> <text_file> <output_mp3>
 
 Features:
 - Headline list detection: newline-separated short lines → each line as separate TTS chunk
-  with 750ms silence gap between headlines so they sound distinct
+  with 1500ms silence gap between headlines so they sound distinct
+- Parallel synthesis: asyncio.gather runs all segments simultaneously (reduces latency)
 - Per-chunk emotion analysis: sports victory → upbeat prosody; tragedy → somber prosody
 - Text normalization: symbols → spoken Telugu/English words
-- Number expansion (Telugu only)
+- Year expansion (Telugu only): 2026 → రెండు వేల ఇరవై ఆరు
 - Abbreviation expansion (CM, PM, IPL, etc.)
 """
 import asyncio
@@ -19,75 +20,194 @@ import struct
 import edge_tts
 
 # ── Telugu digit words ────────────────────────────────────────────────────────
-TE_ONES = ['', 'ఒకటి', 'రెండు', 'మూడు', 'నాలుగు', 'ఐదు', 'ఆరు', 'ఏడు', 'ఎనిమిది', 'తొమ్మిది']
-TE_TENS = ['', 'పది', 'ఇరవై', 'ముప్పై', 'నలభై', 'ఏభై', 'అరవై', 'డెభై', 'ఎనభై', 'తొంభై']
+TE_ONES  = ['', 'ఒకటి', 'రెండు', 'మూడు', 'నాలుగు', 'ఐదు', 'ఆరు', 'ఏడు', 'ఎనిమిది', 'తొమ్మిది']
+TE_TENS  = ['', 'పది',  'ఇరవై', 'ముప్పై', 'నలభై',  'ఏభై',  'అరవై', 'డెభై', 'ఎనభై',   'తొంభై']
+TE_TEENS = [
+    'పది', 'పదకొండు', 'పన్నెండు', 'పదమూడు', 'పదునాలుగు',
+    'పదిహేను', 'పదహారు', 'పదిహేడు', 'పదెనిమిది', 'పంతొమ్మిది',
+]
 
-def num_to_telugu(n):
+# English letter → Telugu pronunciation (for expanding ALL-CAPS abbreviations)
+EN_LETTER_TE = {
+    'A': 'ఏ',  'B': 'బీ',  'C': 'సీ',     'D': 'డీ',     'E': 'ఈ',
+    'F': 'ఎఫ్', 'G': 'జీ',  'H': 'హెచ్',  'I': 'ఐ',     'J': 'జే',
+    'K': 'కే',  'L': 'ఎల్', 'M': 'ఎం',    'N': 'ఎన్',   'O': 'ఓ',
+    'P': 'పీ',  'Q': 'క్యూ','R': 'ఆర్',   'S': 'ఎస్',   'T': 'టీ',
+    'U': 'యూ',  'V': 'వీ',  'W': 'డబ్ల్యూ','X': 'ఎక్స్', 'Y': 'వై',
+    'Z': 'జెడ్',
+}
+
+
+def num_to_telugu(n: int) -> str:
+    """Convert integer 0–9999 to Telugu words. Returns str(n) for out-of-range."""
     try:
         n = int(n)
     except Exception:
         return str(n)
     if n == 0:
         return 'సున్న'
+    if n > 9999:
+        return str(n)   # leave very large numbers; handled upstream (lakhs/crores)
     parts = []
+    if n >= 1000:
+        t = n // 1000
+        parts.append(TE_ONES[t] + ' వేయి')
+        n %= 1000
     if n >= 100:
         h = n // 100
         parts.append(TE_ONES[h] + ' వంద' + ('' if h == 1 else 'ల'))
         n %= 100
-    if n >= 10:
+    if n >= 20:
         parts.append(TE_TENS[n // 10])
-        n %= 10
-    if n > 0:
+        if n % 10:
+            parts.append(TE_ONES[n % 10])
+    elif n >= 10:
+        parts.append(TE_TEENS[n - 10])
+    elif n > 0:
         parts.append(TE_ONES[n])
     return ' '.join(parts)
 
 
+def make_ordinal_te(n: int) -> str:
+    """Return Telugu ordinal for n.  3 → మూడవ  72 → డెభై రెండవ"""
+    word = num_to_telugu(n)
+    # Drop trailing ఉ/ు vowel then append వ (ordinal suffix)
+    if word.endswith('ు'):
+        return word[:-1] + 'వ'
+    if word.endswith('ి'):
+        return word[:-1] + 'వ'
+    return word + 'వ'
+
+
+def expand_en_abbrev(text: str) -> str:
+    """Spell out remaining ALL-CAPS English words letter-by-letter in Telugu.
+    Named abbreviations (CM, IPL …) are already replaced before this runs.
+    RGV → ఆర్ జీ వీ  |  NTR → ఎన్ టీ ఆర్  |  SP → already replaced (ఎస్పీ)
+    """
+    def spell(m):
+        return ' '.join(EN_LETTER_TE.get(c, c) for c in m.group(0))
+    # Match 2+ consecutive uppercase letters (word boundary on both sides)
+    return re.sub(r'\b[A-Z]{2,}\b', spell, text)
+
+
+def year_to_telugu(year_str: str) -> str:
+    """Convert a 4-digit year to Telugu words.
+    Examples: 2026 → 'రెండు వేల ఇరవై ఆరు'  |  1947 → 'ఒకటి వేల తొమ్మిది వందల నలభై ఏడు'
+    Falls back to the original string if out of supported range (1000–2999).
+    """
+    TE_TEENS = [
+        'పది', 'పదకొండు', 'పన్నెండు', 'పదమూడు', 'పదునాలుగు',
+        'పదిహేను', 'పదహారు', 'పదిహేడు', 'పదెనిమిది', 'పంతొమ్మిది',
+    ]
+    try:
+        n = int(year_str)
+    except ValueError:
+        return year_str
+    if not (1000 <= n <= 2999):
+        return year_str
+
+    thousands = n // 1000
+    remainder = n % 1000
+    hundreds  = remainder // 100
+    tens_unit = remainder % 100
+
+    parts = []
+    if thousands:
+        parts.append(TE_ONES[thousands] + ' వేల')
+    if hundreds:
+        parts.append(TE_ONES[hundreds] + ' వంద')
+    if tens_unit >= 20:
+        parts.append(TE_TENS[tens_unit // 10])
+        if tens_unit % 10:
+            parts.append(TE_ONES[tens_unit % 10])
+    elif 10 <= tens_unit <= 19:
+        parts.append(TE_TEENS[tens_unit - 10])
+    elif tens_unit > 0:
+        parts.append(TE_ONES[tens_unit])
+
+    return ' '.join(parts) if parts else year_str
+
+
 # ── Normalise a single line for TTS ──────────────────────────────────────────
 def normalise_line(line: str, lang: str = 'te') -> str:
-    # Remove markdown
+    # ── Step 0: strip markdown / bullets / URLs ───────────────────────────────
     line = re.sub(r'[*#]', '', line)
     line = re.sub(r'^\s*[•\-]\s*', '', line)
     line = re.sub(r'https?://\S+', '', line)
 
     if lang == 'te':
+        # ── Step 1: currency & percentage → Telugu words ──────────────────────
         line = re.sub(r'₹\s*([\d,]+)', r'రూపాయలు \1', line)
         line = re.sub(r'Rs\.?\s*([\d,]+)', r'రూపాయలు \1', line)
         line = re.sub(r'([\d.]+)\s*%', r'\1 శాతం', line)
+
+        # ── Step 2: named abbreviations (longest first to avoid sub-matches) ──
         abbrevs = {
-            r'\bKM\b': 'కిలోమీటర్లు', r'\bkm\b': 'కిలోమీటర్లు',
-            r'\bCM\b': 'ముఖ్యమంత్రి', r'\bPM\b': 'ప్రధానమంత్రి',
-            r'\bMLA\b': 'ఎమ్మెల్యే', r'\bMP\b': 'ఎంపీ',
-            r'\bGDP\b': 'జీ డీ పీ',   r'\bBSE\b': 'బీ ఎస్ ఈ',
-            r'\bBCCI\b': 'బీ సీ సీ ఐ', r'\bNDA\b': 'ఎన్ డీ ఏ',
-            r'\bUPA\b': 'యూ పీ ఏ',    r'\bBJP\b': 'బీ జే పీ',
-            r'\bIMD\b': 'ఐ ఎం డీ',
-            # Cricket / sports abbreviations
-            r'\bIPL\b': 'ఇండియన్ ప్రీమియర్ లీగ్',
-            r'\bT-?20\b': 'టీ ట్వంటీ',
-            r'\bODI\b': 'వన్ డే మ్యాచ్',
-            r'\bFIFA\b': 'ఫిఫా',
-            r'\bNBA\b': 'ఎన్ బీ ఏ',
-            r'\bWC\b': 'వరల్డ్ కప్',
+            # Govt / admin
+            r'\bCM\b':   'ముఖ్యమంత్రి', r'\bPM\b':   'ప్రధానమంత్రి',
+            r'\bMLA\b':  'ఎమ్మెల్యే',   r'\bMP\b':   'ఎంపీ',
+            r'\bDGP\b':  'డీజీపీ',       r'\bSP\b':   'ఎస్పీ',
+            r'\bCI\b':   'సీఐ',          r'\bDSP\b':  'డీఎస్పీ',
+            # Economy / finance
+            r'\bGDP\b':  'జీడీపీ',       r'\bBSE\b':  'బీఎస్ఈ',
+            r'\bNSE\b':  'ఎన్ఎస్ఈ',     r'\bRBI\b':  'ఆర్‌బీఐ',
+            r'\bGST\b':  'జీఎస్టీ',      r'\bIMD\b':  'ఐఎండీ',
+            # Parties
+            r'\bBJP\b':  'బీజేపీ',       r'\bNDA\b':  'ఎన్‌డీఏ',
+            r'\bUPA\b':  'యూపీఏ',        r'\bBRS\b':  'బీఆర్ఎస్',
+            r'\bTDP\b':  'టీడీపీ',       r'\bYSRCP\b':'వైఎస్సార్‌సీపీ',
+            r'\bCPI\b':  'సీపీఐ',
+            # Sports
+            r'\bIPL\b':  'ఇండియన్ ప్రీమియర్ లీగ్',
+            r'\bT-?20\b':'టీ ట్వంటీ',   r'\bODI\b':  'వన్ డే',
+            r'\bFIFA\b': 'ఫిఫా',         r'\bNBA\b':  'ఎన్‌బీఏ',
+            r'\bWC\b':   'వరల్డ్ కప్',   r'\bBCCI\b': 'బీసీసీఐ',
+            # Distance / weight
+            r'\bKM\b':   'కిలోమీటర్లు', r'\bkm\b':   'కిలోమీటర్లు',
+            r'\bKG\b':   'కిలోగ్రాములు',r'\bkg\b':   'కిలోగ్రాములు',
+            # Entertainment / industry
+            r'\bOTT\b':  'ఓటీటీ',        r'\bVFX\b':  'విఎఫ్ఎక్స్',
         }
         for pat, rep in abbrevs.items():
             line = re.sub(pat, rep, line)
+
+        # ── Step 3: expand remaining ALL-CAPS (RGV→ఆర్ జీ వీ, NTR→ఎన్ టీ ఆర్) ──
+        line = expand_en_abbrev(line)
+
         line = re.sub(r'\s*/\s*', ' లేదా ', line)
+
     else:
+        # ── English path ──────────────────────────────────────────────────────
         line = re.sub(r'₹\s*([\d,]+)', r'rupees \1', line)
         line = re.sub(r'Rs\.?\s*([\d,]+)', r'rupees \1', line)
         line = re.sub(r'([\d.]+)\s*%', r'\1 percent', line)
         abbrevs_en = {
-            r'\bCM\b': 'Chief Minister', r'\bPM\b': 'Prime Minister',
-            r'\bGDP\b': 'Gross Domestic Product', r'\bIMD\b': 'Indian Meteorological Department',
+            r'\bCM\b':  'Chief Minister',            r'\bPM\b':  'Prime Minister',
+            r'\bGDP\b': 'Gross Domestic Product',    r'\bIMD\b': 'Indian Meteorological Department',
+            r'\bRBI\b': 'Reserve Bank of India',     r'\bGST\b': 'Goods and Services Tax',
         }
         for pat, rep in abbrevs_en.items():
             line = re.sub(pat, rep, line)
         line = re.sub(r'\s*/\s*', ' or ', line)
 
-    # Remove thousands comma separators: 82,450 → 82450
+    # ── Step 4: remove thousands comma separators: 82,450 → 82450 ─────────────
     line = re.sub(r'(\d),(\d{3})', r'\1\2', line)
 
-    # Ensure line ends with sentence-final punctuation (gives TTS a natural stop)
+    if lang == 'te':
+        # ── Step 5: ordinal numbers  3వ → మూడవ  72వ → డెభై రెండవ ────────────
+        line = re.sub(r'(\d+)వ\b', lambda m: make_ordinal_te(int(m.group(1))), line)
+
+        # ── Step 6: 4-digit years → Telugu words (before general num expansion)
+        # Keeps "2026" as "రెండు వేల ఇరవై ఆరు" not "రెండు వేయి ఇరవై ఆరు"
+        line = re.sub(r'\b(1[0-9]{3}|20[0-9]{2})\b', lambda m: year_to_telugu(m.group(0)), line)
+
+        # ── Step 7: numbers glued to Telugu chars  60ఏళ్ల → అరవై ఏళ్ల ────────
+        line = re.sub(r'(\d+)(?=[ఀ-౿])', lambda m: num_to_telugu(int(m.group(1))), line)
+
+        # ── Step 8: remaining standalone numbers → Telugu words ───────────────
+        line = re.sub(r'\b(\d+)\b', lambda m: num_to_telugu(int(m.group(1))), line)
+
+    # ── Step 9: sentence-final punctuation (gives TTS a natural stop) ─────────
     line = line.strip()
     if line and line[-1] not in '.?!।':
         line += '।'
@@ -109,7 +229,12 @@ _GRIEF_TE = [
 ]
 _TENSION_TE = [
     'నిషేధం', 'అరెస్టు', 'వివాదం', 'ఆరోపణ', 'మోసం', 'విమర్శ',
-    'ఘర్షణ', 'ఆందోళన', 'హెచ్చరిక', 'సమ్మె',
+    'ఘర్షణ', 'ఆందోళన', 'హెచ్చరిక', 'సమ్మె', 'కాంట్రవర్సీ', 'వార్నింగ్',
+]
+_CINEMA_TE = [
+    'సినిమా', 'చిత్రం', 'నటుడు', 'నటి', 'హీరో', 'హీరోయిన్', 'దర్శకుడు',
+    'రిలీజ్', 'ట్రెయిలర్', 'అవార్డు', 'ఓటీటీ', 'టాలీవుడ్', 'బాలీవుడ్',
+    'మూవీ', 'షూటింగ్', 'నేషనల్ అవార్డు',
 ]
 _VICTORY_EN = [
     'win', 'gold', 'record', 'champion', 'victory', 'hat-trick', 'historic',
@@ -123,33 +248,46 @@ _TENSION_EN = [
     'arrested', 'banned', 'controversy', 'accused', 'fraud', 'protest',
     'clash', 'warning', 'strike', 'crisis',
 ]
+_CINEMA_EN = [
+    'movie', 'film', 'actor', 'actress', 'director', 'release', 'trailer',
+    'award', 'ott', 'tollywood', 'bollywood', 'cinema', 'star', 'national award',
+]
 
 
 def detect_emotion(text: str) -> tuple[str, str]:
     """
     Returns (rate_adjustment, pitch_adjustment) SSML prosody values.
-    victory  → slightly faster, higher pitch  (upbeat sports energy)
-    grief    → slower, lower pitch            (somber)
-    tension  → slightly slower, neutral pitch (serious/grave)
-    neutral  → default
+    victory     → faster, brighter pitch   (upbeat sports energy)
+    cinema      → slightly faster, warmer  (entertainment excitement)
+    grief       → slower, lower pitch      (somber)
+    tension     → slightly slower          (serious/grave)
+    neutral     → default
     """
-    victory = (sum(1 for w in _VICTORY_TE  if w in text) +
-               sum(1 for w in _VICTORY_EN  if w in text.lower()))
-    grief   = (sum(1 for w in _GRIEF_TE    if w in text) +
-               sum(1 for w in _GRIEF_EN    if w in text.lower()))
-    tension = (sum(1 for w in _TENSION_TE  if w in text) +
-               sum(1 for w in _TENSION_EN  if w in text.lower()))
+    tl = text.lower()
+    victory = (sum(1 for w in _VICTORY_TE if w in text) +
+               sum(1 for w in _VICTORY_EN if w in tl))
+    grief   = (sum(1 for w in _GRIEF_TE   if w in text) +
+               sum(1 for w in _GRIEF_EN   if w in tl))
+    tension = (sum(1 for w in _TENSION_TE if w in text) +
+               sum(1 for w in _TENSION_EN if w in tl))
+    cinema  = (sum(1 for w in _CINEMA_TE  if w in text) +
+               sum(1 for w in _CINEMA_EN  if w in tl))
 
-    dominant = max(victory, grief, tension)
-    if dominant == 0:
-        return ('-5%', '+0Hz')    # neutral
+    # grief and tension override entertainment signals
+    if grief > 0 or tension > 0:
+        dominant_neg = max(grief, tension)
+        if grief >= tension:
+            return ('-5%', '-3Hz')   # somber — slower, lower
+        else:
+            return ('-2%', '-1Hz')    # serious/tense
 
-    if victory >= grief and victory >= tension:
-        return ('+5%', '+3Hz')    # upbeat — faster, brighter
-    elif grief >= tension:
-        return ('-15%', '-3Hz')   # somber — slower, lower
-    else:
-        return ('-8%', '-1Hz')    # serious/tense — slightly slower
+    if victory > 0:
+        return ('+5%', '+3Hz')        # sports win — faster, brighter
+
+    if cinema > 0:
+        return ('+3%', '+2Hz')        # entertainment — slightly upbeat, engaging
+
+    return ('-5%', '+0Hz')            # neutral
 
 
 # ── Silent MP3 gap ────────────────────────────────────────────────────────────
@@ -161,9 +299,11 @@ def make_silent_mp3(duration_ms: int = 700) -> bytes:
     The silent frame bytes are standard for 32kbps 44100Hz mono.
     """
     # MPEG1 Layer3 32kbps 44100Hz mono — 104 bytes per frame, ~24ms each
-    # Header: 0xFF 0xFB = sync + MPEG1/Layer3; 0x40 = 32kbps; 0x44 = 44100Hz mono
+    # Header breakdown: 0xFF 0xFB = sync + MPEG1/Layer3;
+    #   0x10 = bitrate-index 0001 (32kbps); 0xC4 = 44100Hz + mono channel mode
+    # Total frame size = 144 * bitrate / sample_rate + padding = 144*32000/44100 = 104 bytes ✓
     SILENT_FRAME = (
-        b'\xff\xfb\x40\x44'   # MP3 frame header: MPEG1 L3 32kbps 44100Hz mono
+        b'\xff\xfb\x10\xc4'   # MP3 frame header: MPEG1 L3 32kbps 44100Hz mono
         + b'\x00' * 100       # zero-filled audio data (silence)
     )
     n_frames = max(1, int(duration_ms / 24) + 1)
@@ -251,23 +391,29 @@ async def main():
 
     else:
         # Mixed or multi-segment mode:
-        # Each headline → separate TTS chunk with 750ms silence gap after it.
-        # Paragraph segments → single TTS chunk (no gap within body text).
+        # All segments are synthesised IN PARALLEL (asyncio.gather) to avoid
+        # sequential API round-trips — 8 headlines used to take 8–16s, now ~2s.
+        # After gathering, insert 1500ms silence between every pair so headlines
+        # sound clearly separated when read aloud.
         tmp_dir = tempfile.mkdtemp()
         chunk_files = []   # list of {'type', 'path'}
 
         try:
-            for i, seg in enumerate(segments):
+            async def synthesise_seg(i, seg):
                 rate, pitch = detect_emotion(seg['text'])
                 print(f"[tts_helper] seg {i+1}/{len(segments)} [{seg['type']}]: "
                       f"rate={rate} pitch={pitch} | {seg['text'][:60]}", file=sys.stderr)
                 chunk_path = os.path.join(tmp_dir, f'chunk_{i:03d}.mp3')
                 await synthesise(seg['text'], voice, rate, pitch, chunk_path)
-                chunk_files.append({'type': seg['type'], 'path': chunk_path})
+                return {'type': seg['type'], 'path': chunk_path}
 
-            # Concatenate: insert 750ms silence between every segment pair
-            # so headlines sound distinctly separated from each other and from body text.
-            silence = make_silent_mp3(750)
+            # Run all TTS calls in parallel — drastically reduces total latency
+            results = await asyncio.gather(*[synthesise_seg(i, seg) for i, seg in enumerate(segments)])
+            chunk_files = list(results)   # already in order because gather preserves index
+
+            # Concatenate: 2000ms silence between every pair — gives readers a
+            # clear auditory break between headlines.
+            silence = make_silent_mp3(2000)
             with open(output_mp3, 'wb') as out:
                 for i, chunk in enumerate(chunk_files):
                     with open(chunk['path'], 'rb') as f:
@@ -276,12 +422,15 @@ async def main():
                         out.write(silence)
 
         finally:
-            for chunk in chunk_files:
-                try:
-                    os.unlink(chunk['path'])
-                except OSError:
-                    pass
+            # Clean up ALL files in tmp_dir — not just the ones in chunk_files.
+            # If asyncio.gather raises mid-way, chunk_files may be empty/partial
+            # while some chunks were already written to disk → glob tmp_dir instead.
             try:
+                for fname in os.listdir(tmp_dir):
+                    try:
+                        os.unlink(os.path.join(tmp_dir, fname))
+                    except OSError:
+                        pass
                 os.rmdir(tmp_dir)
             except OSError:
                 pass

@@ -38,6 +38,67 @@ const https = require('https');
 const http  = require('http');
 const store = require('../store/articleStore');
 
+// ── Auto-embed helper ─────────────────────────────────────────────────────────
+// Fires background embedding immediately after articles are ingested so
+// semantic search is available for the first query instead of being a fallback.
+// Wrapped in a lazy require to avoid circular deps at module load time.
+function triggerAutoEmbed() {
+  setImmediate(() => {
+    try {
+      const { embedArticles: _embed } = require('./embed');
+      // Simulate a minimal req/res to call the existing function
+      const fakeRes = {
+        status: () => fakeRes,
+        json:   () => {},
+      };
+      _embed({ body: {} }, fakeRes).catch(e => {
+        console.warn('[NewsAI XML] Auto-embed failed:', e.message);
+      });
+    } catch (e) {
+      console.warn('[NewsAI XML] Auto-embed error:', e.message);
+    }
+  });
+}
+
+// ── Post-ingest background jobs ───────────────────────────────────────────────
+// Each runs in setImmediate to avoid blocking the HTTP response.
+// Wrapped in lazy require to avoid circular deps at module load time.
+
+function triggerCacheRefresh() {
+  setImmediate(() => {
+    try {
+      const { refreshCache } = require('./gemini-cache');
+      refreshCache().catch(e => console.warn('[NewsAI XML] Cache refresh failed:', e.message));
+    } catch (e) {
+      console.warn('[NewsAI XML] Cache refresh error:', e.message);
+    }
+  });
+}
+
+function triggerChipsBuild() {
+  setImmediate(() => {
+    try {
+      const { buildChips } = require('./chips');
+      buildChips(store.getAllArticles());
+    } catch (e) {
+      console.warn('[NewsAI XML] Chips build error:', e.message);
+    }
+  });
+}
+
+function triggerDigestGeneration() {
+  setImmediate(() => {
+    try {
+      const { generateDigest } = require('./digest');
+      generateDigest(store.getAllArticles()).catch(e =>
+        console.warn('[NewsAI XML] Digest generation failed:', e.message)
+      );
+    } catch (e) {
+      console.warn('[NewsAI XML] Digest generation error:', e.message);
+    }
+  });
+}
+
 // ── Poll state ──────────────────────────────────────────────────────────────
 let lastPollTime  = null;
 let lastPollCount = 0;
@@ -72,6 +133,45 @@ function xmlAll(xml, tag) {
   return results;
 }
 
+// ── Image URL extractor from a single item's raw XML ─────────────────────────
+function extractImageUrl(itemXml) {
+  // Strategy 1: <media:content url="..."> or <media:content url='...'>
+  let m = itemXml.match(/<media:content[^>]+url=["']([^"']+)["']/i);
+  if (m) return m[1];
+
+  // Strategy 2: <enclosure url="..." type="image/...">
+  m = itemXml.match(/<enclosure[^>]+url=["']([^"']+)["'][^>]+type=["']image\//i);
+  if (!m) m = itemXml.match(/<enclosure[^>]+type=["']image\/[^"']*["'][^>]+url=["']([^"']+)["']/i);
+  if (m) return m[1];
+
+  // Strategy 3: <media:thumbnail url="...">
+  m = itemXml.match(/<media:thumbnail[^>]+url=["']([^"']+)["']/i);
+  if (m) return m[1];
+
+  // Strategy 4: <thumbnail>url</thumbnail> or <image><url>...</url></image>
+  m = itemXml.match(/<thumbnail>([^<]+)<\/thumbnail>/i);
+  if (m) return m[1].trim();
+  m = itemXml.match(/<image[^>]*>[\s\S]*?<url>([^<]+)<\/url>/i);
+  if (m) return m[1].trim();
+
+  // Strategy 5: first <img src="..."> in description/content (skip 1×1 tracker pixels)
+  m = itemXml.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i);
+  if (m) {
+    // Skip pixel trackers (width=1 or height=1)
+    const imgTag = m[0];
+    if (/width=["']?1["']?/i.test(imgTag) || /height=["']?1["']?/i.test(imgTag)) return null;
+    return m[1];
+  }
+
+  return null;
+}
+
+// Validate extracted image URL — must be http/https, reject data: and javascript:
+function isValidImageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return /^https?:\/\//i.test(url.trim());
+}
+
 // ── Core parser ─────────────────────────────────────────────────────────────
 function parseXML(xmlString) {
   const articles = [];
@@ -80,13 +180,15 @@ function parseXML(xmlString) {
   const rssItems = xmlAll(xmlString, 'item');
   if (rssItems.length > 0) {
     for (const item of rssItems) {
-      const title   = xmlTag(item, 'title');
-      const content = xmlTag(item, 'content:encoded', 'content', 'description', 'summary');
-      const section = xmlTag(item, 'category', 'section', 'cat');
-      const url     = xmlTag(item, 'link', 'guid', 'url');
-      const pubDate = xmlTag(item, 'pubDate', 'pubdate', 'dc:date', 'published');
+      const title    = xmlTag(item, 'title');
+      const content  = xmlTag(item, 'content:encoded', 'content', 'description', 'summary');
+      const section  = xmlTag(item, 'category', 'section', 'cat');
+      const url      = xmlTag(item, 'link', 'guid', 'url');
+      const pubDate  = xmlTag(item, 'pubDate', 'pubdate', 'dc:date', 'published');
+      const rawImg   = extractImageUrl(item);
+      const imageUrl = isValidImageUrl(rawImg) ? rawImg : null;
       if (title && title.length > 3) {
-        articles.push({ title, section: section || 'General', content, url, publishedAt: pubDate });
+        articles.push({ title, section: section || 'General', content, url, publishedAt: pubDate, imageUrl });
       }
     }
     if (articles.length) return articles;
@@ -96,11 +198,13 @@ function parseXML(xmlString) {
   const entries = xmlAll(xmlString, 'entry');
   if (entries.length > 0) {
     for (const entry of entries) {
-      const title   = xmlTag(entry, 'title');
-      const content = xmlTag(entry, 'content', 'summary');
-      const section = xmlTag(entry, 'category');
-      const url     = xmlTag(entry, 'id', 'link');
-      if (title) articles.push({ title, section: section || 'General', content, url, publishedAt: '' });
+      const title    = xmlTag(entry, 'title');
+      const content  = xmlTag(entry, 'content', 'summary');
+      const section  = xmlTag(entry, 'category');
+      const url      = xmlTag(entry, 'id', 'link');
+      const rawImg   = extractImageUrl(entry);
+      const imageUrl = isValidImageUrl(rawImg) ? rawImg : null;
+      if (title) articles.push({ title, section: section || 'General', content, url, publishedAt: '', imageUrl });
     }
     if (articles.length) return articles;
   }
@@ -124,8 +228,10 @@ function parseXML(xmlString) {
                              'articleLink', 'storyLink', 'weburl', 'permalink');
       const pubDate = xmlTag(item, 'publishedAt', 'pubdate', 'date', 'datetime', 'PublishedAt',
                              'publishdate', 'created_date', 'storydate', 'newsdate');
+      const rawImg  = extractImageUrl(item);
+      const imageUrl = isValidImageUrl(rawImg) ? rawImg : null;
       if (title && title.length > 3) {
-        articles.push({ title, section: section || 'General', content, url, publishedAt: pubDate });
+        articles.push({ title, section: section || 'General', content, url, publishedAt: pubDate, imageUrl });
       }
     }
     if (articles.length) return articles;
@@ -141,13 +247,17 @@ function ingestArticles(parsed) {
   for (const a of parsed) {
     if (!a.title || a.title.length < 3) continue;
     try {
+      // Use URL path to detect section — more reliable than RSS <category> which
+      // Sakshi often returns as "General" or "National" regardless of the actual section.
+      const resolvedSection = normalizeSectionFromUrl(a.url, a.section);
       store.addArticle({
         title:    a.title,
-        section:  a.section || 'General',
-        tags:     [`#${(a.section || 'general').toLowerCase().replace(/\s+/g, '')}`],
+        section:  resolvedSection,
+        tags:     [`#${resolvedSection.toLowerCase().replace(/[\s&]+/g, '')}`],
         content:  (a.content || '').slice(0, 2000),
         url:      a.url || '',
         language: detectLanguage(a.title),
+        imageUrl: a.imageUrl || null,
       });
       count++;
     } catch (e) {
@@ -161,6 +271,47 @@ function ingestArticles(parsed) {
 function detectLanguage(text) {
   const teluguChars = (text.match(/[ఀ-౿]/g) || []).length;
   return teluguChars > 2 ? 'te' : 'en';
+}
+
+// ── URL-based section detection ────────────────────────────────────────────────
+// Sakshi URL pattern: sakshi.com/telugu-news/{section}/{slug}-{id}
+// Many Telugu CMS feeds tag all articles as "General" or "National" in the RSS
+// <category> field, even when the URL path clearly identifies the section.
+// This function detects the true section from the URL path and overrides the
+// RSS-supplied category when a more specific match is found.
+const URL_SECTION_MAP = [
+  { paths: ['/telangana'],                        section: 'Telangana' },
+  { paths: ['/andhra-pradesh', '/andhra/'],        section: 'Andhra Pradesh' },
+  { paths: ['/sports', '/cricket/'],               section: 'Sports' },
+  { paths: ['/movies', '/cinema', '/entertainmen'],section: 'Cinema' },
+  { paths: ['/business', '/economy', '/finance'],  section: 'Business' },
+  { paths: ['/national', '/india/'],               section: 'National' },
+  { paths: ['/international', '/world/'],          section: 'International' },
+  { paths: ['/politics', '/political'],            section: 'Politics' },
+  { paths: ['/education'],                         section: 'Education' },
+  { paths: ['/agriculture', '/farming'],           section: 'Agriculture' },
+  { paths: ['/crime', '/police/', '/law/'],        section: 'Crime & Police' },
+  { paths: ['/technology', '/tech/', '/cyber'],    section: 'Technology' },
+  { paths: ['/health', '/medical'],                section: 'Public Health' },
+  { paths: ['/courts', '/legal', '/judiciary'],    section: 'Courts' },
+  { paths: ['/railways', '/railway/', '/metro/'],  section: 'Railways' },
+  { paths: ['/family', '/lifestyle'],              section: 'Family' },
+  { paths: ['/women', '/mahila'],                  section: 'Women' },
+];
+
+/**
+ * Returns the best section label for an article.
+ * Prefers URL-derived section over RSS-supplied category (which is often wrong).
+ * Falls back to rawSection, then 'General'.
+ */
+function normalizeSectionFromUrl(url, rawSection) {
+  if (url) {
+    const path = url.toLowerCase();
+    for (const entry of URL_SECTION_MAP) {
+      if (entry.paths.some(p => path.includes(p))) return entry.section;
+    }
+  }
+  return rawSection || 'General';
 }
 
 // ── Fetch XML from a remote URL ────────────────────────────────────────────
@@ -185,8 +336,12 @@ function fetchXML(url, _redirectsLeft = 2) {
       }
       let data = '';
       let size = 0;
+      // Decode as a UTF-8 stream — `data += chunk` on raw Buffers converts each
+      // chunk independently, corrupting multibyte Telugu characters that get
+      // split across chunk boundaries (they become U+FFFD replacement chars).
+      res.setEncoding('utf8');
       res.on('data', chunk => {
-        size += chunk.length;
+        size += Buffer.byteLength(chunk); // chunk is a string now — count bytes, not chars
         if (size > MAX_XML_BYTES) {
           req.destroy();
           return reject(new Error('XML response too large (max 5 MB)'));
@@ -221,6 +376,14 @@ async function ingestXML(req, res) {
 
   console.log(`[NewsAI XML] Direct ingest: parsed=${parsed.length}, ingested=${ingested}`);
   res.json({ parsed: parsed.length, ingested, stats, message: `Ingested ${ingested} articles` });
+
+  // Fire all background jobs after ingest
+  if (ingested > 0) {
+    triggerAutoEmbed();
+    triggerCacheRefresh();
+    triggerChipsBuild();
+    triggerDigestGeneration();
+  }
 }
 
 /**
@@ -248,6 +411,13 @@ async function pollXML(req, res) {
     lastPollTime  = new Date().toISOString();
     lastPollCount = ingested;
     console.log(`[NewsAI XML] Poll from ${url}: parsed=${parsed}, ingested=${ingested}`);
+    // Fire all background jobs after successful poll
+    if (ingested > 0) {
+      triggerAutoEmbed();
+      triggerCacheRefresh();
+      triggerChipsBuild();
+      triggerDigestGeneration();
+    }
   } catch (err) {
     return res.status(502).json({ error: `Poll failed: ${err.message}` });
   }
@@ -264,6 +434,12 @@ async function pollXML(req, res) {
         lastPollTime  = new Date().toISOString();
         lastPollCount = n;
         console.log(`[NewsAI XML] Auto-poll from ${url}: ${n} new articles`);
+        if (n > 0) {
+          triggerAutoEmbed();
+          triggerCacheRefresh();
+          triggerChipsBuild();
+          triggerDigestGeneration();
+        }
       } catch (e) {
         console.error('[NewsAI XML] Auto-poll error:', e.message);
       }

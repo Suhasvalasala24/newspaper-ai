@@ -400,7 +400,9 @@
     if (enriched.length && out.length < budget * 0.95) {
       out += 'FULL TEXT:\n';
       for (const a of enriched) {
-        const entry = `[${a._n}] ${a.headline.slice(0, 70)}: ${a.body.slice(0, MAX_BODY_CHARS)}\n`;
+        // a._n is set in Phase 1 loop — guard for articles that were budget-skipped in Phase 1
+        const label = a._n != null ? `[${a._n}] ` : '';
+        const entry = `${label}${a.headline.slice(0, 70)}: ${a.body.slice(0, MAX_BODY_CHARS)}\n`;
         if (out.length + entry.length > budget) break;
         out += entry;
       }
@@ -470,7 +472,8 @@
       fetch(`${BACKEND_URL}/api/embed`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ hfApiKey: cfg && cfg.hfApiKey }),
+        // Configs use "huggingFaceApiKey" (see configs/eenadu.json) — accept both names
+        body:    JSON.stringify({ hfApiKey: cfg && (cfg.hfApiKey || cfg.huggingFaceApiKey) }),
       }).then(r => r.json())
         .then(d => console.log(`[NewsAI] 🔮 HF embed triggered: ${d.message}`))
         .catch(() => {/* non-critical — keyword search still works */});

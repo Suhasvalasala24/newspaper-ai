@@ -19,8 +19,18 @@
   let isListening = false;
   let voiceInputActive = false; // true when current message came from mic
   const MAX_HISTORY = 4;  // keep last 4 exchanges — saves ~1200+ tokens per request
-  let promptCount = 0;  // increments on each user message; non-skippable ad every 4th
+  let promptCount = 0;  // increments on each user message; non-skippable ad every 3rd
   let backendBaseUrl = 'http://localhost:3001'; // overridden from config.backendUrl in init()
+
+  // ─── Gemini context cache (Feature: backend caching) ─────────────────────
+  let geminiCacheId     = null;  // resource name, e.g. "cachedContents/abc123"
+  let geminiCacheExpiry = 0;     // epoch ms
+
+  // ─── Daily digest cache (Feature: pre-generated digest) ──────────────────
+  let dailyDigest = { te: null, en: null };
+
+  // ─── Font size preference (Feature: A/A+ control) ────────────────────────
+  let fontSizePref = 'normal'; // 'normal' | 'large'
 
   // ─── TTS voice cache ─────────────────────────────────────────────────────
   // speechSynthesis.getVoices() returns [] on first synchronous call — voices
@@ -63,6 +73,17 @@
     },
   };
   const t = (key) => (I18N[currentLang] || I18N.en)[key] || key;
+
+  // ─── Analytics — fire-and-forget event log ────────────────────────────────
+  function track(type, data) {
+    try {
+      fetch(backendBaseUrl + '/api/analytics', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ type, lang: currentLang, data: data || {} }),
+      }).catch(() => {});   // never throw or block the UI
+    } catch (_) {}
+  }
 
   // ─── Next word suggestions ────────────────────────────────────────────────
   // Curated news-aware query list for predictive input (like a mobile keyboard bar).
@@ -136,17 +157,24 @@
     speakerOff: `<svg viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`,
     copy: `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
     check: `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`,
+    whatsapp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>`,
   };
 
   // ─── Build DOM ─────────────────────────────────────────────────────────────
   function buildWidget(config) {
-    const { brand, position, defaultLanguage } = config;
+    // brand may be missing entirely if config loading failed — never crash the widget
+    const { position, defaultLanguage } = config;
+    const brand = config.brand || {};
     currentLang = defaultLanguage || 'te';
 
     // Restore session history + language preference
     try {
       const saved = sessionStorage.getItem('newsai_history');
-      if (saved) conversationHistory = JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Corrupted storage could hold a non-array — that would crash .push/.filter later
+        if (Array.isArray(parsed)) conversationHistory = parsed;
+      }
       const savedLang = sessionStorage.getItem('newsai_lang');
       if (savedLang && (savedLang === 'te' || savedLang === 'en')) currentLang = savedLang;
     } catch (_) {}
@@ -157,7 +185,7 @@
 
     // Sanitise brand fields before injecting into innerHTML
     const safeName      = escHtml(brand.name || 'NewsAI').replace(/<br>/g, ' ');
-    const safeShortName = escHtml(brand.shortName || brand.name.charAt(0) || 'N').replace(/<br>/g, ' ');
+    const safeShortName = escHtml(brand.shortName || (brand.name || 'N').charAt(0) || 'N').replace(/<br>/g, ' ');
     const safeNameAttr  = escAttr(brand.name || 'NewsAI');
     // Only allow http/https logo URLs to prevent javascript: injection
     const safeLogoUrl   = (brand.logoUrl && /^https?:\/\//i.test(brand.logoUrl)) ? escAttr(brand.logoUrl) : '';
@@ -186,6 +214,10 @@
               <span class="newsai-status-text-online">${t('online')}</span>
               <span class="newsai-status-text-loading">${t('loading')}</span>
             </div>
+          </div>
+          <div class="newsai-font-controls" id="newsai-font-controls">
+            <button class="newsai-font-btn" id="newsai-font-sm" aria-label="Smaller text" title="Smaller text">A</button>
+            <button class="newsai-font-btn newsai-font-btn--lg" id="newsai-font-lg" aria-label="Larger text" title="Larger text">A+</button>
           </div>
           <button class="newsai-close-btn" id="newsai-close" aria-label="Close chat">${ICONS.close}</button>
         </div>
@@ -246,7 +278,33 @@
       offline:     $('newsai-offline-banner'),
       notice:      $('newsai-voice-notice'),
       suggestions: $('newsai-suggestions'),
+      fontSm:   $('newsai-font-sm'),
+      fontLg:   $('newsai-font-lg'),
     };
+
+    // ── Font size control ─────────────────────────────────────────────────────
+    try {
+      const saved = localStorage.getItem('newsai_fontsize');
+      if (saved === 'large') { fontSizePref = 'large'; wrapper.classList.add('newsai-font-large'); }
+      else if (saved === 'small') { fontSizePref = 'small'; wrapper.classList.add('newsai-font-small'); }
+    } catch (_) {}
+
+    if (el.fontSm) {
+      el.fontSm.addEventListener('click', () => {
+        wrapper.classList.remove('newsai-font-large');
+        wrapper.classList.add('newsai-font-small');
+        fontSizePref = 'small';
+        try { localStorage.setItem('newsai_fontsize', 'small'); } catch (_) {}
+      });
+    }
+    if (el.fontLg) {
+      el.fontLg.addEventListener('click', () => {
+        wrapper.classList.remove('newsai-font-small');
+        wrapper.classList.add('newsai-font-large');
+        fontSizePref = 'large';
+        try { localStorage.setItem('newsai_fontsize', 'large'); } catch (_) {}
+      });
+    }
 
     // ── Wire events ──────────────────────────────────────────────────────────
     el.fab.addEventListener('click', () => isOpen ? closePanel(el) : openPanel(el, config));
@@ -289,12 +347,38 @@
     isOpen = true;
     el.panel.classList.add('newsai-open');
     el.badge.classList.add('newsai-hidden');
+    track('open');
 
-    // Render welcome or restore session
-    if (conversationHistory.length === 0) {
-      renderWelcome(el, config);
-    } else {
-      restoreMessages(el, conversationHistory);
+    // Fetch dynamic chips in background — update SUGGESTIONS if available
+    fetch(backendBaseUrl + '/api/chips', { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && Array.isArray(data.te) && data.te.length > 0) {
+          SUGGESTIONS.te = data.te;
+          SUGGESTIONS.en = data.en && data.en.length > 0 ? data.en : SUGGESTIONS.en;
+        }
+      })
+      .catch(() => {});
+
+    // Fetch digest in background — used in renderWelcome if available
+    fetch(backendBaseUrl + '/api/digest', { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.ready) {
+          dailyDigest = { te: data.te || null, en: data.en || null };
+        }
+      })
+      .catch(() => {});
+
+    // Render welcome or restore session — only into an EMPTY container.
+    // The messages live in the DOM across close/reopen; re-rendering on every
+    // open duplicated the welcome card / entire history each time.
+    if (el.messages.children.length === 0) {
+      if (conversationHistory.length === 0) {
+        renderWelcome(el, config);
+      } else {
+        restoreMessages(el, conversationHistory);
+      }
     }
     setTimeout(() => el.input.focus(), 300);
   }
@@ -338,11 +422,30 @@
         '</div>'
       : '';
 
+    // Pre-generated digest — shown if available, collapsed by default
+    const digestText = dailyDigest[currentLang] || null;
+    const digestHtml = digestText
+      ? `<div class="newsai-digest-card" id="newsai-digest-card">
+          <div class="newsai-digest-header" id="newsai-digest-toggle">
+            <span>${currentLang === 'te' ? '📰 ఈ రోజు సారాంశం' : '📰 Today\'s Digest'}</span>
+            <span class="newsai-digest-arrow">▾</span>
+          </div>
+          <div class="newsai-digest-body" id="newsai-digest-body" style="display:none">
+            ${renderBotText(digestText.slice(0, 500) + (digestText.length > 500 ? '…' : ''))}
+            ${digestText.length > 500
+              ? `<button class="newsai-digest-more" id="newsai-digest-expand">
+                  ${currentLang === 'te' ? 'మరింత చదవండి →' : 'Read more →'}
+                </button>` : ''}
+          </div>
+        </div>`
+      : '';
+
     const msgEl = document.createElement('div');
     msgEl.className = 'newsai-msg newsai-msg-bot';
     msgEl.innerHTML = `
       <div class="newsai-bubble">
         ${escHtml(welcome)}
+        ${digestHtml}
         <div class="newsai-news-cards">
           ${sampleCards.map(c => `
             <div class="newsai-news-card">
@@ -357,12 +460,35 @@
       </div>
       <div style="display:flex;align-items:center;gap:4px">
         ${makeSpeakBtn(welcome)}
+        ${makeShareBtn(welcome)}
         <button class="newsai-copy-btn" title="Copy" aria-label="Copy message">${ICONS.copy}</button>
         <span class="newsai-msg-time">${timeStr()}</span>
       </div>
     `;
+
+    // Wire digest toggle + expand
+    if (digestText) {
+      const toggle = msgEl.querySelector('#newsai-digest-toggle');
+      const body   = msgEl.querySelector('#newsai-digest-body');
+      const arrow  = msgEl.querySelector('.newsai-digest-arrow');
+      if (toggle && body) {
+        toggle.addEventListener('click', () => {
+          const open = body.style.display !== 'none';
+          body.style.display = open ? 'none' : 'block';
+          if (arrow) arrow.textContent = open ? '▾' : '▴';
+        });
+      }
+      const expandBtn = msgEl.querySelector('#newsai-digest-expand');
+      if (expandBtn && body) {
+        expandBtn.addEventListener('click', () => {
+          body.innerHTML = renderBotText(digestText);
+          expandBtn.remove();
+        });
+      }
+    }
     el.messages.appendChild(msgEl);
     wireCopy(msgEl);
+    wireShare(msgEl);
 
     // Wire chips
     msgEl.querySelectorAll('.newsai-chip').forEach(chip => {
@@ -394,10 +520,12 @@
         '<div class="newsai-bubble">' + renderBotText(text) + '</div>' +
         '<div style="display:flex;align-items:center;gap:4px">' +
           makeSpeakBtn(text) +
+          makeShareBtn(text) +
           '<button class="newsai-copy-btn" title="Copy" aria-label="Copy message">' + ICONS.copy + '</button>' +
           '<span class="newsai-msg-time">' + timeStr() + '</span>' +
         '</div>';
       wireSpeak(msgEl);
+      wireShare(msgEl);
       wireCopy(msgEl);
     } else {
       msgEl.innerHTML = `
@@ -493,7 +621,7 @@
           <div class="newsai-ad-body">
             <div class="newsai-ad-icon">📰</div>
             <div class="newsai-ad-title" style="color:${safeColor}">${safeBrandName}</div>
-            <div class="newsai-ad-sub">Premium వార్తలు, లోతైన విశ్లేషణ<br>Subscribe చేసుకోండి — AD-free అనుభవం పొందండి</div>
+            <div class="newsai-ad-sub">${currentLang === 'en' ? 'Premium news, in-depth analysis<br>Subscribe for an AD-free experience' : 'Premium వార్తలు, లోతైన విశ్లేషణ<br>Subscribe చేసుకోండి — AD-free అనుభవం పొందండి'}</div>
           </div>
           <div class="newsai-ad-foot">
             <button class="newsai-ad-skip" id="newsai-ad-skip-btn" disabled>Skip in 10s</button>
@@ -546,6 +674,7 @@
 
     el.input.value = '';
     el.send.disabled = true;
+    track('query', { query: text.slice(0, 100) });
 
     // ── Detect section for post-response redirect button ──────────────────────
     const _topicForRedirect = detectAndFilterTopic(text, null);
@@ -587,9 +716,23 @@
       const reply = await callClaude(config);
       delete config._onStream;
 
+      // Snap and consume _lastArticles before any async gaps
+      let lastArticles = window.NewsAI && window.NewsAI._lastArticles;
+      if (window.NewsAI) window.NewsAI._lastArticles = null;
+      // DOM fallback: when backend was unavailable, keyword-match against DOM-scraped articles
+      if (!lastArticles) {
+        const domArts = window.NewsAI && window.NewsAI.articles;
+        const lastUser = conversationHistory.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
+        if (domArts && domArts.length && lastUser) {
+          lastArticles = domFallbackArticles(lastUser, domArts);
+        }
+      }
+
       if (!streamedEl) {
         hideTyping();
         streamedEl = appendMessage(el.messages, 'bot', reply || '(empty response)');
+        // Don't inject article links when AI explicitly says info isn't in today's paper
+        if (!isNoInfoReply(reply)) injectArticleLinks(streamedEl, lastArticles);
       } else {
         const finalText = reply || fullReply;
         // Upgrade from textContent (safe during streaming) to rendered HTML with clickable links
@@ -602,8 +745,18 @@
           newSpeakBtn.dataset.text = finalText;
           oldSpeakBtn.parentNode.replaceChild(newSpeakBtn, oldSpeakBtn);
         }
+        // Same fix for share button — update data-text to final streamed content.
+        const oldShareBtn = streamedEl.querySelector('.newsai-share-btn');
+        if (oldShareBtn) {
+          const newShareBtn = oldShareBtn.cloneNode(true);
+          newShareBtn.dataset.text = finalText;
+          oldShareBtn.parentNode.replaceChild(newShareBtn, oldShareBtn);
+        }
         wireSpeak(streamedEl);
+        wireShare(streamedEl);
         wireCopy(streamedEl);
+        // Don't inject article links when AI explicitly says info isn't in today's paper
+        if (!isNoInfoReply(finalText)) injectArticleLinks(streamedEl, lastArticles);
         scrollToBottom(el.messages);
       }
 
@@ -647,7 +800,7 @@
           sectionBtn.className = 'newsai-read-btn';
           sectionBtn.style.cssText = [
             'display:block', 'width:100%', 'margin-top:8px', 'padding:8px 14px',
-            'background:#C0392B', 'color:#fff', 'border-radius:20px',
+            'background:var(--newsai-primary,#C0392B)', 'color:#fff', 'border-radius:20px',
             'border:none', 'cursor:pointer', 'font-size:12px', 'font-weight:600',
             'text-align:center',
           ].join(';');
@@ -720,8 +873,9 @@
       console.log(`[NewsAI] ✅ Backend RAG: ${data.articles?.length} articles matched`);
       // Store top matched articles for redirect buttons (up to 3, URL required)
       if (data.articles && data.articles.length > 0 && window.NewsAI) {
+        const _seenUrls = new Set();
         window.NewsAI._lastArticles = data.articles
-          .filter(function(a) { return !!a.url; })
+          .filter(function(a) { return !!a.url && !_seenUrls.has(a.url) && _seenUrls.add(a.url); })
           .slice(0, 3)
           .map(function(a) { return { url: a.url, title: a.title || '' }; });
       }
@@ -964,7 +1118,7 @@
     return anthropicText;
   }
 
-  // ─── Gemini 2.5 Flash ─────────────────────────────────────────────────────
+  // ─── Gemini 2.5 Flash-Lite ────────────────────────────────────────────────
   async function callGemini(apiKey, systemPrompt, messages, onStream, _retries = 0) {
     const contents = messages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
@@ -974,12 +1128,48 @@
     while (deduped.length > 0 && deduped[0].role !== 'user') deduped.shift();
     if (!deduped.length) throw new Error('No user messages to send to Gemini');
 
-    const MODEL = 'gemini-2.5-pro';
-    const bodyObj = {
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: deduped,
-      generationConfig: { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85 },
-    };
+    const MODEL = 'gemini-2.5-flash-lite';
+
+    // Use Gemini context cache when available — avoids resending all articles every request
+    // (90% cheaper on cached input tokens). Falls back to full systemInstruction if cache
+    // is missing, expired, or the backend doesn't support caching (too few articles).
+    const activeCacheId = (geminiCacheId && Date.now() < geminiCacheExpiry) ? geminiCacheId : null;
+
+    // Per-query overlay: language rule + anti-hallucination + basic rules — these change
+    // on every request (language toggle, topic, etc.) and must ALWAYS be sent fresh.
+    // When cache is active the articles are already in the cache; this slim overlay is the
+    // only systemInstruction we send so we don't re-pay for the full article tokens.
+    const _isEn = currentLang === 'en';
+    const _langOverride = _isEn
+      ? 'RESPOND IN ENGLISH ONLY. Translate ALL Telugu article text to English. Every word of your response must be in English.'
+      : 'RESPOND IN TELUGU. Every word of your response must be in Telugu script. Only proper nouns may stay in English.';
+    const cacheOverlayInstruction = `🔴 LANGUAGE OVERRIDE — HIGHEST PRIORITY: ${_langOverride}
+This overrides every previous message in this conversation. Ignore the language used before.
+
+🔴 ANTI-HALLUCINATION — ABSOLUTE RULE:
+- ONLY use facts EXPLICITLY WRITTEN in today's cached articles.
+- Do NOT invent specific numbers (live scores, prices, index levels, statistics) not written in those articles. If relevant articles exist for the topic: show them using TIER 1 format. Only say "ఈ వివరాలు ఈ రోజు పేపర్‌లో లేవు" if there are NO relevant articles at all. You may add one brief note that live real-time figures may not appear in print — only if the user specifically asked for a live number.
+
+STRICT RULES: Use **bold** only for headlines. Never invent scores, statistics, player names, or numbers. Never include URLs in your response. Never include CMS datelines, timestamps, or "Updated on" text.`;
+
+    const bodyObj = activeCacheId
+      ? {
+          // cachedContent holds today's articles (pre-cached by backend).
+          // systemInstruction sends per-query language/anti-hallucination rules alongside it.
+          cachedContent: activeCacheId,
+          systemInstruction: { parts: [{ text: cacheOverlayInstruction }] },
+          contents: deduped,
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85 },
+        }
+      : {
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: deduped,
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85 },
+        };
+
+    if (activeCacheId) {
+      console.log('[NewsAI] Using Gemini context cache:', activeCacheId);
+    }
 
     // ── Streaming path ─────────────────────────────────────────────────────
     if (onStream) {
@@ -1089,16 +1279,16 @@
     { triggers: ['cinema','movie','film','tollywood','bollywood','ott','actor','actress','release','సినిమా','నటుడు','నటి','చిత్రం','వినోదం','టాలీవుడ్','ఓటీటీ','మూవీ'],
       section: 'Cinema',
       bodyKeys: ['cinema','movie','film','actor','actress','director','release','ott','tollywood','bollywood','trailer','సినిమా','నటుడు','నటి','చిత్రం','దర్శకుడు','రిలీజ్','ట్రైలర్','హీరో','హీరోయిన్'] },
-    { triggers: ['telangana','hyderabad','ts','secunderabad','revanth','ktr','brs','warangal','nizamabad','karimnagar','తెలంగాణ','హైదరాబాద్','సికింద్రాబాద్','వరంగల్','రేవంత్','కేటీఆర్'],
+    { triggers: ['telangana','hyderabad','secunderabad','revanth','ktr','brs','warangal','nizamabad','karimnagar','తెలంగాణ','హైదరాబాద్','సికింద్రాబాద్','వరంగల్','రేవంత్','కేటీఆర్'],
       section: 'Telangana',
       bodyKeys: ['telangana','hyderabad','secunderabad','revanth','ktr','brs','warangal','nizamabad','karimnagar','khammam','తెలంగాణ','హైదరాబాద్','కేటీఆర్','రేవంత్'] },
-    { triggers: ['andhra','ap','amaravati','vijayawada','vizag','chandrababu','jagan','tdp','ysrcp','ఆంధ్ర','అమరావతి','విజయవాడ','విజాగ్','చంద్రబాబు','జగన్','ఏపీ'],
+    { triggers: ['andhra','amaravati','vijayawada','vizag','chandrababu','jagan','tdp','ysrcp','ఆంధ్ర','అమరావతి','విజయవాడ','విజాగ్','చంద్రబాబు','జగన్','ఏపీ'],
       section: 'Andhra Pradesh',
       bodyKeys: ['andhra','amaravati','vijayawada','vizag','visakhapatnam','chandrababu','jagan','tdp','ysrcp','guntur','tirupati','ఆంధ్ర','అమరావతి','విజయవాడ','చంద్రబాబు','జగన్'] },
     { triggers: ['national','india','central','modi','bjp','congress','parliament','lok sabha','జాతీయ','కేంద్ర','ఢిల్లీ','భారత్','మోదీ','పార్లమెంట్'],
       section: 'National',
       bodyKeys: ['national','india','central government','modi','bjp','congress','parliament','lok sabha','rajya sabha','delhi','జాతీయ','కేంద్ర','మోదీ','పార్లమెంట్','లోక్‌సభ'] },
-    { triggers: ['international','world','global','usa','america','china','russia','war','iran','israel','అంతర్జాతీయ','విదేశీ','ప్రపంచం','అమెరికా','చైనా'],
+    { triggers: ['international','world','global','usa','america','china','russia','warfare','iran','israel','అంతర్జాతీయ','విదేశీ','ప్రపంచం','అమెరికా','చైనా','యుద్ధం'],
       section: 'International',
       bodyKeys: ['international','world','global','america','usa','china','russia','war','iran','israel','trump','అంతర్జాతీయ','విదేశీ','ప్రపంచం','అమెరికా','యుద్ధం'] },
     { triggers: ['business','economy','market','sensex','nifty','rbi','stock','budget','gdp','వ్యాపారం','ఆర్థిక','మార్కెట్','షేర్','బడ్జెట్','సెన్సెక్స్'],
@@ -1119,7 +1309,7 @@
     { triggers: ['crime','police','murder','arrest','robbery','fraud','నేరం','పోలీసు','హత్య','అరెస్టు','మోసం','క్రైమ్'],
       section: 'Crime & Police',
       bodyKeys: ['murder','killed','arrested','robbery','fraud','police','crime','theft','నేరం','హత్య','పోలీసు','అరెస్టు','దొంగతనం','మోసం','దాడి'] },
-    { triggers: ['technology','cyber','tech','ai','mobile','app','software','సాంకేతిక','సైబర్','మొబైల్','యాప్'],
+    { triggers: ['technology','cyber','tech','artificial intelligence','mobile','app','software','సాంకేతిక','సైబర్','మొబైల్','యాప్'],
       section: 'Technology',
       bodyKeys: ['technology','cyber','software','app','mobile','internet','ai','digital','hacking','సాంకేతిక','సైబర్','సాఫ్ట్‌వేర్','యాప్','ఇంటర్నెట్'] },
     { triggers: ['court','high court','supreme court','judge','verdict','న్యాయస్థానం','హైకోర్టు','సుప్రీంకోర్టు','తీర్పు'],
@@ -1201,8 +1391,12 @@
   function stripTimestamps(text) {
     if (!text) return text;
     return text
+      // Strip CMS datelines like "సాక్షి, వైఎస్సార్‌ జిల్లా:" embedded in article bodies
+      .replace(/సాక్షి\s*,\s*[^\n:]{1,60}:\s*/g, '')
       .replace(/\s*\|?\s*Updated\s+on\s+[A-Za-z]{3,9}\.?\s+\d{1,2}\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)/gi, '')
       .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)/gi, '')
+      // Strip Telugu CMS date patterns like "2023 ఫిబ్రవరి" leaking from metadata
+      .replace(/\b\d{4}\s+(?:జనవరి|ఫిబ్రవరి|మార్చి|ఏప్రిల్|మే|జూన్|జూలై|ఆగస్టు|సెప్టెంబర్|అక్టోబర్|నవంబర్|డిసెంబర్)\b/g, '')
       .replace(/\s*\|\s*$/gm, '').replace(/^\s*\|\s*/gm, '')
       .trim();
   }
@@ -1219,7 +1413,10 @@
       if (body.length >= 150 && body !== a.headline) {
         // Pre-extract first sentence in JS — LLM copies Summary field, never generates it.
         const summary = extractFirstSentence(body);
-        if (summary) out += `Summary: ${summary}\n`;
+        const normStr = s => s.replace(/[.?!।\s]+$/g, '').replace(/^\s+/, '').toLowerCase();
+        if (summary && normStr(summary) !== normStr(a.headline)) {
+          out += `Summary: ${summary}\n`;
+        }
         out += `Body: ${body.slice(0, 450)}\n`;
       } else {
         // Too short — LLM shows headline only
@@ -1251,33 +1448,52 @@
         : 'ఏ వార్త పూర్తి వివరాలు కావాలో అడగండి.';
 
       return `You are ${brand.name}, a newspaper AI assistant.
-${langRule}
+
+🔴 LANGUAGE OVERRIDE — HIGHEST PRIORITY: ${langRule}
+This overrides the language of every previous message in this conversation. Ignore what language was used before. Your ENTIRE response must follow the rule above — translate every Telugu word to English if English is required, or respond fully in Telugu if Telugu is required. The conversation history language does NOT determine your output language. This rule does.
+
+🔴 ANTI-HALLUCINATION — ABSOLUTE RULE:
+- ONLY use information EXPLICITLY WRITTEN in TODAY'S ARTICLES below.
+- Do NOT invent or generate specific numbers (live scores, stock prices, index levels, exchange rates, statistics) not written word-for-word in TODAY'S ARTICLES.
+- If RELEVANT ARTICLES EXIST for the topic: show them using TIER 1 format. You may add one brief note that live real-time figures may not appear in today's print edition — only if the user specifically asked for a live number.
+- Only say "ఈ వివరాలు ఈ రోజు పేపర్‌లో లేవు" if there are truly NO relevant articles about the topic at all.
 
 STRICT RULES:
 1. ONLY use information present in TODAY'S ARTICLES below. Never add facts from training knowledge.
 2. NEVER invent scores, statistics, player names, or any numbers not in the article text.
-3. If Body says "[HEADLINE ONLY — DO NOT ADD ANY DESCRIPTION]": that is an INTERNAL DATA TAG. NEVER print it. Output ONLY the bold **Headline text** and nothing else.
+3. If Body says "[HEADLINE ONLY — DO NOT ADD ANY DESCRIPTION]": INTERNAL TAG — never print it. Output only the bold **Headline**.
 4. No bullet points, no [1][2] numbers. Plain text only.
 5. Never write the same sentence twice.
-6. NEVER include URLs, links, or web addresses in your response. URL fields are internal data only — do NOT print them.
-7. Do NOT truncate. List EVERY article in TODAY'S ARTICLES and finish the response completely.
-8. NEVER include dates, timestamps, times, or "Updated on" text in your response — these are metadata and must be stripped out. Output only the news content itself.
+6. NEVER include URLs, links, or web addresses in your response.
+7. Do NOT truncate. Finish the response completely. Never cut off mid-sentence.
+8. NEVER include dates, timestamps, or "Updated on" text — strip them.
+9. NEVER include CMS datelines like "సాక్షి, X జిల్లా:". Strip them.
 
-For EACH article in TODAY'S ARTICLES:
-• Write the Headline in bold using **Headline text** (wrap exactly in double asterisks).
-• If a "Summary:" field is present: on the next line write its text content — everything after "Summary: ". Do NOT write the word "Summary:" itself.
-• If Body says "[HEADLINE ONLY — DO NOT ADD ANY DESCRIPTION]": that tag is INTERNAL — do NOT print it. Write the bold **Headline** only. Nothing after the headline.
-• Leave a blank line between each article.
-End with exactly this sentence: "${closingLine}"
+── TIER 1: News listing (section query / top headlines / "ఈ రోజు వార్తలు") ──
+When the user asks for a category of news, top stories, or today's headlines:
+• For EACH article: write the Headline in bold: **Headline text**
+• If a "Summary:" field exists AND its text differs from the Headline: write 1 sentence of that summary on the next line as plain text. Do NOT write the word "Summary:".
+• ⛔ NEVER read or quote the "Body:" field in TIER 1. Body content is strictly for TIER 2 only.
+• If Body says "[HEADLINE ONLY...]": bold headline only — nothing else.
+• Blank line between each article.
+End with exactly: "${closingLine}"
 
-⛔ HALLUCINATION FORBIDDEN: Do not generate descriptions. Do not rephrase. Print summary text content verbatim, NEVER the "Summary:" label.
+── TIER 2: Single article detail ("వివరాలు చెప్పు" / "tell me more about X") ──
+When the user EXPLICITLY asks for more detail about ONE specific article ("tell me more", "వివరాలు", "explain X", "మరింత వివరంగా"):
+• Find that article in TODAY'S ARTICLES.
+• Write 4–5 sentences using ONLY what the "Body:" field contains. Copy verbatim, do not rephrase or add anything.
+• If the user says "short" / "సంక్షిప్తంగా": 2–3 sentences from Body.
+• If Body says "[HEADLINE ONLY...]": say (in the response language) "Only the headline is available for this article."
+• If the article is not found: one sentence saying it is not in today's edition.
+
+⛔ HALLUCINATION FORBIDDEN. ⛔ ${langRule}
 
 TODAY'S ARTICLES:
 ${backendContent}
 
 ---
-REMINDER: Only what is written above. Nothing from training data.
-${langRule}`;
+FINAL REMINDER — LANGUAGE: ${langRule}
+FINAL REMINDER — NO HALLUCINATION: If a fact is not in TODAY'S ARTICLES above, do not write it.`;
     }
 
     // ── DOM fallback ─────────────────────────────────────────────────────────
@@ -1348,17 +1564,24 @@ ${langRule}`;
       : 'ఈ రోజు [topic] వార్తలు కనుగొనలేదు.';
 
     return `You are ${brand.name}, a newspaper AI assistant.
-${langRule}
+
+🔴 LANGUAGE OVERRIDE — HIGHEST PRIORITY: ${langRule}
+This overrides every previous message in this conversation. Ignore the language used before. ${isEnglish ? 'Translate ALL Telugu text in TODAY\'S ARTICLES to English. Every word of your response must be English.' : 'Every word of your response must be Telugu script.'}
+
+🔴 ANTI-HALLUCINATION — ABSOLUTE RULE:
+- ONLY use information EXPLICITLY WRITTEN in TODAY'S ARTICLES below.
+- Do NOT invent or generate specific numbers (live scores, prices, index levels, statistics) not written in TODAY'S ARTICLES. If relevant articles exist for the topic: show them using TIER 1 format. You may add one brief note that live real-time figures may not appear in today's print edition — only if the user specifically asked for a live number. Only say "ఈ వివరాలు ఈ రోజు పేపర్‌లో లేవు" if there are NO relevant articles at all.
 
 STRICT RULES:
 1. ONLY use information present in TODAY'S ARTICLES below. Never add facts from your training knowledge.
 2. NEVER invent scores, statistics, player names, run counts, wickets, vote counts, prices, or any numbers not written in the article text below.
 3. If the article body does not contain a specific fact, DO NOT write that fact. If asked for details not in the text, say (in the response language) that the details are not available.
-4. No bullet points, no [1][2] numbers, no asterisks. Plain text only.
+4. No bullet points, no [1][2] numbers. Use **double asterisks** only to bold headlines as instructed below.
 5. Never write the same sentence twice in a single response.
 6. Complete your answer — do not stop mid-list. List EVERY article and finish fully. Never truncate.
 7. NEVER include URLs, links, or web addresses in your response. URL fields are internal data only — do NOT print them.
 8. NEVER include dates, timestamps, times, or "Updated on" text in your response — these are article metadata, not news content. Strip them out entirely.
+9. NEVER include CMS datelines like "సాక్షి, X జిల్లా:" or any "PublicationName, PlaceName:" prefix. Strip them completely.
 
 TWO-TIER RESPONSE MODE:
 
@@ -1415,8 +1638,9 @@ TODAY'S ARTICLES:
 ${todayContent}
 
 ---
-REMINDER: Do NOT add scores, statistics, or any facts not written above. If the article text does not contain a detail, do not write it.
-${langRule}${topicConstraint}`;
+🔴 FINAL LANGUAGE REMINDER: ${langRule}
+🔴 FINAL ANTI-HALLUCINATION REMINDER: Do NOT invent numbers (scores, prices, statistics) not in TODAY'S ARTICLES. If relevant articles exist for the topic, show them. Only say "not in paper" when NO relevant articles exist.
+${topicConstraint}`;
   }
 
   // ─── Language switch ───────────────────────────────────────────────────────
@@ -1428,6 +1652,7 @@ ${langRule}${topicConstraint}`;
     });
     el.input.placeholder = t('placeholder');
     if (recognition) recognition.lang = lang === 'te' ? 'te-IN' : 'en-IN';
+    track('lang_switch', { lang });
   }
 
   // ─── Voice Input ──────────────────────────────────────────────────────────
@@ -1493,7 +1718,7 @@ ${langRule}${topicConstraint}`;
         banner.id = 'newsai-listening-banner';
         banner.style.cssText = `
           position:absolute; bottom:130px; left:50%; transform:translateX(-50%);
-          background:#C0392B; color:#fff; padding:6px 16px; border-radius:20px;
+          background:var(--newsai-primary,#C0392B); color:#fff; padding:6px 16px; border-radius:20px;
           font-size:12px; font-weight:600; white-space:nowrap;
           box-shadow:0 2px 8px rgba(0,0,0,0.2); z-index:99;
           animation: newsai-fadein 0.2s ease;
@@ -1511,7 +1736,7 @@ ${langRule}${topicConstraint}`;
     isListening = true;
     el.mic.classList.add('newsai-listening');
     el.input.placeholder = t('listening');
-    el.input.style.borderColor = '#C0392B';
+    el.input.style.borderColor = 'var(--newsai-primary,#C0392B)';
     showListeningBanner(el, true);
     playBeep(660, 120);   // high beep = start
     recognition.lang = currentLang === 'te' ? 'te-IN' : 'en-IN';
@@ -1571,6 +1796,99 @@ ${langRule}${topicConstraint}`;
       } else {
         fallbackCopy(text, markCopied);
       }
+    });
+  }
+
+  // ─── DOM fallback for article links ──────────────────────────────────────
+  // Used when backend is down/slow: keyword-matches user query against DOM-scraped
+  // window.NewsAI.articles and returns top 3 as { url, title } for injectArticleLinks.
+  function domFallbackArticles(userQuery, domArticles) {
+    if (!domArticles || !domArticles.length || !userQuery) return null;
+    const qWords = userQuery.toLowerCase().replace(/[^\wఀ-౿\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+    if (!qWords.length) return null;
+
+    const scored = domArticles.map(a => {
+      const text = ((a.headline || a.title || '') + ' ' + (a.summary || '') + ' ' + (a.section || '')).toLowerCase();
+      const score = qWords.reduce((s, w) => s + (text.includes(w) ? 1 : 0), 0);
+      return { url: a.url, title: a.headline || a.title || '', score };
+    }).filter(a => a.url && /^https?:\/\//i.test(a.url) && a.score > 0);
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, 3);
+    return top.length ? top : null;
+  }
+
+  // ─── Read full article links ──────────────────────────────────────────────
+  function truncateTitle(title, maxLen) {
+    if (!title) return '';
+    return title.length > maxLen ? title.slice(0, maxLen).trim() + '…' : title;
+  }
+
+  // Returns true when the AI response is a "not in today's paper" refusal.
+  // In that case, showing article links below is contradictory — suppress them.
+  function isNoInfoReply(text) {
+    if (!text) return false;
+    return text.includes('ఈ వివరాలు ఈ రోజు పేపర్‌లో లేవు') ||
+           text.includes('not in today\'s paper') ||
+           text.includes('not in today\'s edition') ||
+           text.includes('This information is not in today') ||
+           text.includes('not available in today');
+  }
+
+  function injectArticleLinks(msgEl, articles) {
+    if (!articles || !articles.length) return;
+    const valid = articles.filter(a => a.url && /^https?:\/\//i.test(a.url));
+    if (!valid.length) return;
+
+    const container = document.createElement('div');
+    container.className = 'newsai-article-links';
+
+    if (valid.length === 1) {
+      container.innerHTML =
+        '<a class="newsai-article-link newsai-article-link--single" href="' + escAttr(valid[0].url) +
+        '" target="_blank" rel="noopener noreferrer">📰 Read full article →</a>';
+    } else {
+      container.innerHTML = valid.map(a =>
+        '<a class="newsai-article-link" href="' + escAttr(a.url) +
+        '" target="_blank" rel="noopener noreferrer">📰 ' +
+        escHtml(truncateTitle(a.title, 55)) + ' →</a>'
+      ).join('');
+    }
+
+    // Track article link clicks
+    container.querySelectorAll('.newsai-article-link').forEach(link => {
+      link.addEventListener('click', () => track('article_click', { url: link.href }));
+    });
+
+    // Inject article thumbnails if any have imageUrl
+    const withImages = articles.filter(a => a.imageUrl && /^https?:\/\//i.test(a.imageUrl)).slice(0, 3);
+    if (withImages.length > 0) {
+      const thumbStrip = document.createElement('div');
+      thumbStrip.className = 'newsai-thumb-strip';
+      thumbStrip.innerHTML = withImages.map(a =>
+        '<img class="newsai-thumb" src="' + escAttr(a.imageUrl) +
+        '" alt="' + escAttr(truncateTitle(a.title, 40)) +
+        '" loading="lazy" onerror="this.parentElement.removeChild(this)" />'
+      ).join('');
+      container.appendChild(thumbStrip);
+    }
+
+    msgEl.appendChild(container);
+  }
+
+  // ─── WhatsApp share button ────────────────────────────────────────────────
+  function makeShareBtn(text) {
+    return `<button class="newsai-share-btn" data-text="${escAttr(text)}" aria-label="Share on WhatsApp" title="Share on WhatsApp">${ICONS.whatsapp}</button>`;
+  }
+
+  function wireShare(msgEl) {
+    const btn = msgEl.querySelector('.newsai-share-btn');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const text = btn.dataset.text || msgEl.querySelector('.newsai-bubble')?.textContent?.trim() || '';
+      if (!text) return;
+      const url = 'https://wa.me/?text=' + encodeURIComponent(text);
+      window.open(url, '_blank', 'noopener,noreferrer');
     });
   }
 
@@ -1660,10 +1978,10 @@ ${langRule}${topicConstraint}`;
 
   // ─── Voice Output ─────────────────────────────────────────────────────────
   // TTS tiers (in order of quality):
-  //   Tier 1: Web Speech API — immediate, within gesture. Poor for Telugu (no te-IN voice).
-  //   Tier 2: Backend /api/tts — Python edge-tts, te-IN-ShrutiNeural (server-side only).
-  //           Note: browser WebSocket to speech.platform.bing.com gets 403 — server use only.
-  //           Only attempted for Telugu text (English Web Speech en-IN Rishi is adequate).
+  //   Tier 1: Backend /api/tts — Sarvam Bulbul v3 (WAV output, emotion-aware pace).
+  //           Telugu: anushka  |  English: vidya
+  //           Used for BOTH languages — gives proper headline gaps + emotional prosody.
+  //   Tier 2: Web Speech API — fallback when backend is unavailable.
   //
   // TTS tier availability — null=unchecked, true=working, false=skip this session
   let backendTtsAvailable = null;
@@ -1691,6 +2009,7 @@ ${langRule}${topicConstraint}`;
     if (window.speechSynthesis) speechSynthesis.cancel();
     if (currentUtterance?._type === 'backend') { try { currentUtterance.stop(); } catch (_) {} }
 
+    track('tts');
     isSpeaking = true;
     speakingMsgEl = btn;
     currentUtterance = null;
@@ -1698,13 +2017,16 @@ ${langRule}${topicConstraint}`;
     btn.classList.add('newsai-speaking');
 
     const resetBtn = () => {
-      isSpeaking = false; speakingMsgEl = null; currentUtterance = null;
       btn.innerHTML = ICONS.speaker; btn.classList.remove('newsai-speaking');
+      // Only clear global speaking state if this button is still the active
+      // speaker — a stale async callback must not clobber a newer speak request.
+      if (speakingMsgEl !== btn) return;
+      isSpeaking = false; speakingMsgEl = null; currentUtterance = null;
     };
 
     // Language for TTS follows the active pill (currentLang), not text-content detection.
-    // Pill = 'te' → Telugu backend TTS (te-IN-ShrutiNeural) → Web Speech Telugu fallback.
-    // Pill = 'en' → skip backend (it only has a Telugu voice) → Web Speech English directly.
+    // Pill = 'te' → Telugu backend TTS (Sarvam anushka) → Web Speech Telugu fallback.
+    // Pill = 'en' → English backend TTS (Sarvam vidya) → Web Speech English fallback.
     const lang         = currentLang === 'en' ? 'en' : 'te';
     const isTeluguText = lang === 'te'; // kept for voice-selection logic below
 
@@ -1717,7 +2039,7 @@ ${langRule}${topicConstraint}`;
     const TTS_LIMIT = 2000;
     let neuralText;
     if (neuralFull.length > TTS_LIMIT) {
-      // Cap at 6 headlines: each headline = 1 edge-tts call (~1.5s each), so 6 ≈ 9s total — safe within timeout.
+      // Cap at 6 headlines to keep audio within the 25s fetch timeout.
       const shortLines = neuralFull.split('\n').filter(l => l.trim().length > 0 && l.trim().length <= 120).slice(0, 6);
       const headlinesOnly = shortLines.join('\n');
       if (headlinesOnly.length >= 30) {
@@ -1734,11 +2056,12 @@ ${langRule}${topicConstraint}`;
     // Guard: if stripping markdown left us with nothing, bail — don't send a 400.
     if (!neuralText || !neuralText.trim()) { resetBtn(); return; }
 
-    // ── Tier 1: Backend /api/tts (Python edge-tts, te-IN-ShrutiNeural) ──────
+    // ── Tier 1: Backend /api/tts (Sarvam Bulbul v3, WAV output) ─────────────
     // AudioContext created synchronously inside the click handler (gesture context)
     // so Chrome's autoplay permission is granted before the async fetch.
-    // English pill → skip backend (backend only has te-IN voice; English goes to Web Speech).
-    if (lang === 'te' && backendTtsAvailable !== false) {
+    // Both Telugu and English use Sarvam bulbul:v3 with emotion-aware pace control.
+    // AudioContext.decodeAudioData handles WAV natively — no MP3 decoder needed.
+    if (backendTtsAvailable !== false) {
       let audioCtx;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1758,6 +2081,9 @@ ${langRule}${topicConstraint}`;
             backendTtsAvailable = true;
             const arrayBuffer = await resp.arrayBuffer();
             const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            // Superseded: user started speaking another message while this fetch
+            // was in flight — don't start a second, overlapping audio stream.
+            if (speakingMsgEl !== btn) { try { audioCtx.close(); } catch (_) {} return; }
             const source = audioCtx.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(audioCtx.destination);
@@ -1779,17 +2105,18 @@ ${langRule}${topicConstraint}`;
           // "Failed to fetch" / "NetworkError" = server not running — keep retrying next click.
           // Timeouts = server overloaded — keep retrying too.
           // Check e.name for DOMException types (TimeoutError/AbortError live in .name, not .message)
-          // HTTP 4xx = bad input (transient — server is healthy, just bad payload this call).
-          // HTTP 5xx = server error (persistent — disable for session).
+          // All HTTP errors (4xx and 5xx) treated as transient — our backend wraps Sarvam
+          // API errors as HTTP 500, so a single Sarvam failure must not lock out TTS for
+          // the whole session. Only true network failure permanently disables.
           // Network/timeout errors = server unreachable (transient — keep retrying).
           const isTransient = !e.message
             || e.name === 'TimeoutError'
             || e.name === 'AbortError'
             || /failed to fetch|networkerror|fetch|timed out/i.test(e.message)
-            || /HTTP 4\d\d/.test(e.message);
+            || /HTTP [45]\d\d/.test(e.message);  // 4xx AND 5xx = retry next click
           if (!isTransient) {
             backendTtsAvailable = false;
-            console.warn('[NewsAI TTS] Permanently disabling backend TTS (HTTP error)');
+            console.warn('[NewsAI TTS] Permanently disabling backend TTS (network unreachable)');
           } else {
             backendTtsAvailable = null;
           }
@@ -1798,6 +2125,8 @@ ${langRule}${topicConstraint}`;
     }
 
     // ── Tier 2: Web Speech API fallback ──────────────────────────────────────
+    // Superseded while awaiting the backend fetch — a newer speak owns playback now.
+    if (speakingMsgEl !== btn) return;
     if (!window.speechSynthesis) { resetBtn(); return; }
 
     const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
@@ -1915,7 +2244,7 @@ ${langRule}${topicConstraint}`;
       const safeHref = escAttr(url);
       const safeText = escHtml(url).replace(/<br>/g, '');
       return '<a href="' + safeHref + '" target="_blank" rel="noopener noreferrer" ' +
-             'style="color:#C0392B;word-break:break-all;text-decoration:underline;">' +
+             'style="color:var(--newsai-primary,#C0392B);word-break:break-all;text-decoration:underline;">' +
              safeText + '</a>';
     });
     return html;
@@ -2015,6 +2344,18 @@ ${langRule}${topicConstraint}`;
     }
 
     const el = buildWidget(config);
+
+    // Fetch Gemini context cache ID in background — used by callGemini()
+    fetch(backendBaseUrl + '/api/gemini-cache', { signal: AbortSignal.timeout(3000) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.active && data.cacheId) {
+          geminiCacheId     = data.cacheId;
+          geminiCacheExpiry = data.expiresAt || 0;
+          console.log('[NewsAI] Gemini context cache active:', geminiCacheId);
+        }
+      })
+      .catch(() => {});  // cache miss — fall through to full system prompt
 
     // Load content
     if (window.NewsAI && window.NewsAI.loadContent) {

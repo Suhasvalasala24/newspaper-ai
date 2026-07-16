@@ -1,3 +1,22 @@
-.env
+# ── Dependencies ───────────────────────────────────────────────────────────────
 node_modules/
+backend/node_modules/
+
+# ── Secrets — NEVER commit these ───────────────────────────────────────────────
+.env
+backend/.env
+
+# ── OS / editor junk ───────────────────────────────────────────────────────────
+.DS_Store
 *.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Audio cache (generated at runtime, can be large) ───────────────────────────
+backend/tts-cache/

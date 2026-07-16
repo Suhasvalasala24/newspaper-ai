@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "News AI Assistant",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-powered assistant for your newspaper — summarize, ask, and listen to today's news.",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": [

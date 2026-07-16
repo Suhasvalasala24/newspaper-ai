@@ -78,6 +78,9 @@
 
   /** Simple hex darkener — reduces each RGB channel by `amount` */
   function darkenHex(hex, amount) {
+    // Only 6-digit hex is supported; anything else (#f00, "orange", rgb(...))
+    // would produce "#NaNNaNNaN" — return the input unchanged instead.
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
     const h = hex.replace('#', '');
     const r = Math.max(0, parseInt(h.slice(0, 2), 16) - amount);
     const g = Math.max(0, parseInt(h.slice(2, 4), 16) - amount);

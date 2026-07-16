@@ -3,6 +3,44 @@
 const store         = require('../store/articleStore');
 const { embedText } = require('./embed');
 
+// ── Query response cache (1-hour TTL) ────────────────────────────────────────
+// Caches the full query result keyed by question + topN so identical concurrent
+// requests ("today's headlines?" from 50 users at once) share one HF call.
+// 1-hour TTL: news articles typically don't change within an hour, so cache hits
+// are safe. Cleared at IST midnight when the article store resets.
+// Cleared automatically when entries expire — no manual eviction needed.
+const queryCache   = new Map();   // key → { result, expiresAt }
+const CACHE_TTL_MS = 60 * 60 * 1000;  // 1 hour — news articles update infrequently, safe to cache longer
+
+function cacheGet(key) {
+  const entry = queryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { queryCache.delete(key); return null; }
+  return entry.result;
+}
+function cacheSet(key, result) {
+  queryCache.set(key, { result, expiresAt: Date.now() + CACHE_TTL_MS });
+  // Evict expired entries when cache grows large
+  if (queryCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of queryCache) { if (now > v.expiresAt) queryCache.delete(k); }
+    // Hard cap: with a 1-hour TTL, a flood of unique questions can outpace
+    // expiry-based eviction and grow the Map without bound. Drop the oldest
+    // (Maps iterate in insertion order) until we're back under the cap.
+    while (queryCache.size > 500) {
+      queryCache.delete(queryCache.keys().next().value);
+    }
+  }
+}
+
+// ── HF circuit breaker ────────────────────────────────────────────────────────
+// After 3 consecutive HF timeouts skip semantic for 60s to prevent every query
+// paying a 2s penalty during a cold-start period.
+let hfFailCount    = 0;
+let hfSkipUntil    = 0;
+const HF_FAIL_LIMIT = 3;
+const HF_SKIP_MS   = 60_000;
+
 /**
  * Remove repeated sentences/fragments from article body text.
  * Handles RSS/CMS bugs where the same sentence is repeated many times.
@@ -84,13 +122,23 @@ function extractFirstSentence(text) {
  *   Above this the LLM may quote 1 sentence from Body (system prompt enforces this).
  */
 async function queryArticles(req, res) {
-  const { topN = 30, hfApiKey } = req.body;
+  const { hfApiKey } = req.body;
+  // Clamp topN to a sane integer — it flows into the cache key and result slice,
+  // so a huge/garbage value would pollute the cache and bloat responses.
+  const rawTopN = parseInt(req.body.topN, 10);
+  const topN    = Number.isFinite(rawTopN) ? Math.min(Math.max(rawTopN, 1), 50) : 15;
   // Clamp question length — prevent very long queries from hogging keyword search
   const rawQ = req.body.question;
   if (!rawQ || !String(rawQ).trim()) {
     return res.status(400).json({ error: 'question is required' });
   }
-  const question = String(rawQ).trim().slice(0, 500);
+
+  // Strip zero-width chars (ZWNJ, ZWJ, BOM) before validation — Telugu text uses them.
+  // A string of only ZWNJs passes .trim() but tokenises to nothing, wasting an HF call.
+  const question = String(rawQ).replace(/[​-‍﻿]/g, '').trim().slice(0, 500);
+  if (!question || !/[\p{L}\p{N}]/u.test(question)) {
+    return res.status(400).json({ error: 'question is required' });
+  }
 
   const allStats = store.getStats();
 
@@ -103,34 +151,55 @@ async function queryArticles(req, res) {
     });
   }
 
+  // ── Cache lookup ───────────────────────────────────────────────────────────
+  const cacheKey = `${question}|${topN}`;
+  const cached   = cacheGet(cacheKey);
+  if (cached) {
+    console.log(`[NewsAI Query] CACHE HIT "${question.slice(0, 50)}"`);
+    return res.json({ ...cached, cached: true });
+  }
+
   // ── Phase 1: Keyword search ────────────────────────────────────────────────
   let results  = store.queryArticles(question, topN);
   let method   = 'keyword';
   const topScore = results[0]?._score || 0;
 
-  // ── Phase 2: Semantic fallback ─────────────────────────────────────────────
-  // Only triggered when keyword search is weak AND embeddings exist.
-  const embStats       = store.getEmbeddingStats();
-  const shouldSemantic = (results.length === 0 || topScore < 5) && embStats.withEmbedding > 0;
+  // ── Phase 2: Always-on hybrid semantic ────────────────────────────────────
+  // Run hybrid scoring whenever embeddings exist, not just when keyword score is weak.
+  // If HF is unavailable (cold start / circuit open), keyword results are kept.
+  const embStats   = store.getEmbeddingStats();
+  const hfReady    = Date.now() > hfSkipUntil;
+  const shouldHybrid = embStats.withEmbedding > 0 && hfReady;
 
-  if (shouldSemantic) {
+  if (shouldHybrid) {
     const apiKey   = hfApiKey || process.env.HF_API_KEY || null;
     // 2s timeout — if HF is cold/slow, fall through to keyword results gracefully
     const queryVec = await embedText(question, apiKey, 2000);
 
     if (queryVec) {
+      hfFailCount = 0;  // success — reset circuit breaker
       const hybridResults = store.queryHybrid(question, queryVec, topN);
       if (hybridResults.length > 0) {
         results = hybridResults;
-        method  = 'hybrid-semantic';
+        method  = 'hybrid';
+      }
+    } else {
+      // HF timed out or unavailable
+      hfFailCount++;
+      if (hfFailCount >= HF_FAIL_LIMIT) {
+        hfSkipUntil = Date.now() + HF_SKIP_MS;
+        hfFailCount = 0;
+        console.warn('[NewsAI Query] HF circuit open — skipping semantic for 60s');
       }
     }
   }
 
+  const embStats2 = store.getEmbeddingStats(); // re-fetch in case it changed during HF await
   console.log(
     `[NewsAI Query] "${question.slice(0, 50)}" → ${results.length}/${allStats.total} articles` +
     ` | top: ${topScore} | method: ${method}` +
-    ` | embeds: ${embStats.withEmbedding}/${embStats.total}`
+    ` | embeds: ${embStats2.withEmbedding}/${embStats2.total}` +
+    ` | hf-circuit: ${Date.now() < hfSkipUntil ? 'OPEN' : 'closed'}`
   );
 
   if (results.length === 0) {
@@ -164,7 +233,26 @@ async function queryArticles(req, res) {
     context += '\n';
   }
 
-  res.json({ articles: results, context, stats: allStats, method });
+  // Deduplicate by URL so the widget never shows the same article link twice
+  // (can occur when Phase 1 + Phase 2 scrapes both ingest the same story)
+  const seenUrls  = new Set();
+  const dedupedResults = results.filter(a => {
+    if (!a.url) return true;          // no URL — always include
+    if (seenUrls.has(a.url)) return false;
+    seenUrls.add(a.url);
+    return true;
+  });
+
+  const result = { articles: dedupedResults, context, stats: allStats, method };
+  cacheSet(cacheKey, result);  // cache for 1 hour
+  res.json(result);
 }
 
-module.exports = { queryArticles };
+// Called at IST midnight reset to evict yesterday's cached answers
+function clearQueryCache() {
+  queryCache.clear();
+  hfFailCount = 0;
+  hfSkipUntil = 0;
+}
+
+module.exports = { queryArticles, clearQueryCache };

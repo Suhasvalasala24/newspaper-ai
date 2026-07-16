@@ -20,5 +20,15 @@
   "groqApiKey": "REPLACE_WITH_GROQ_KEY",
   "llmProvider": "groq",
   "llmModel": "llama-3.1-8b-instant",
+  "backendUrl": "REPLACE_WITH_BACKEND_URL",
+  "sectionUrls": {
+    "National": "https://www.eenadu.net/national",
+    "Telangana": "https://www.eenadu.net/states/telangana",
+    "Andhra Pradesh": "https://www.eenadu.net/states/andhra-pradesh",
+    "International": "https://www.eenadu.net/international",
+    "Sports": "https://www.eenadu.net/sports",
+    "Business": "https://www.eenadu.net/business",
+    "Cinema": "https://www.eenadu.net/entertainment"
+  },
   "position": "bottom-right"
 }

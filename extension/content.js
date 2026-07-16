@@ -307,11 +307,35 @@
   }
 
   // ── 3. Load API key from chrome.storage ───────────────────────────────────
+  // Reads sync first (persists across reloads, reinstalls, and devices via Google account).
+  // Falls back to local storage (covers offline Chrome or sync-disabled profiles).
+  // The key is saved to BOTH stores by popup.js, so at least one will always have it.
   function getStoredKey() {
     return new Promise(resolve => {
       try {
-        chrome.storage.local.get(['newsai_groq_key'], result => {
-          resolve((result && result.newsai_groq_key) || '');
+        chrome.storage.sync.get(['newsai_api_key', 'newsai_groq_key'], syncResult => {
+          if (chrome.runtime.lastError) {
+            console.warn('[NewsAI] sync.get error:', chrome.runtime.lastError.message);
+          }
+          const syncKey = syncResult && (syncResult.newsai_api_key || syncResult.newsai_groq_key);
+          if (syncKey) {
+            console.log('[NewsAI] ✅ API key loaded from sync storage. Provider prefix:', syncKey.slice(0, 6));
+            resolve(syncKey);
+            return;
+          }
+          // Fallback: local storage (older saves or sync unavailable)
+          chrome.storage.local.get(['newsai_api_key', 'newsai_groq_key'], localResult => {
+            if (chrome.runtime.lastError) {
+              console.warn('[NewsAI] local.get error:', chrome.runtime.lastError.message);
+            }
+            const localKey = localResult && (localResult.newsai_api_key || localResult.newsai_groq_key);
+            if (localKey) {
+              console.log('[NewsAI] ✅ API key loaded from local storage. Provider prefix:', localKey.slice(0, 6));
+            } else {
+              console.warn('[NewsAI] ❌ No API key found in sync or local storage. Open the extension popup and paste your key.');
+            }
+            resolve(localKey || '');
+          });
         });
       } catch (e) {
         console.warn('[NewsAI] chrome.storage unavailable:', e.message);
@@ -561,6 +585,7 @@
         contentSource:   { type: 'preloaded' },
         apiKey:          apiKey,   // provider-agnostic; widget detects from key prefix
         llmModel:        'llama-3.1-8b-instant',
+        backendUrl:      'http://localhost:3001', // RAG/TTS/digest/chips — change to deployed URL when hosted
         position:        'bottom-right',
         sectionUrls:     SECTION_URLS,
       },
@@ -588,6 +613,14 @@
     // not after the 4-second Phase 2 delay.
     const isImagePage = articles.length > 0 && articles[0].url.startsWith('https://www.sakshi.com') && window.location.hostname.includes('epaper');
     let cachedSectionArticles = []; // reused by Phase 2 so we don't re-fetch
+
+    if (isImagePage) {
+      // epaper image pages can't fetch section sub-pages, but we still need to
+      // unblock section-specific queries — push Phase 1 articles as-is so
+      // sectionPagesReady gets set to true in newsai-content.js.
+      console.log('[NewsAI] isImagePage — skipping section fetches, pushing Phase 1 articles directly');
+      pushContentRefresh(articles);
+    }
 
     if (!isImagePage) {
       fetchSectionPages(articles).then(augmented => {

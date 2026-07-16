@@ -43,9 +43,22 @@ function setMissing() {
   keyInput.value = '';
 }
 
-// Load saved key on popup open
-chrome.storage.local.get(['newsai_groq_key'], function (result) {
-  const key = result.newsai_groq_key;
+// Load saved key on popup open.
+// Try chrome.storage.sync first (survives reloads, reinstalls, browser wipes).
+// Fall back to chrome.storage.local for offline Chrome or sync-disabled profiles.
+function loadSavedKey(cb) {
+  chrome.storage.sync.get(['newsai_api_key', 'newsai_groq_key'], function (syncResult) {
+    const syncKey = syncResult && (syncResult.newsai_api_key || syncResult.newsai_groq_key);
+    if (syncKey) { cb(syncKey); return; }
+    // Fallback: local storage (older saves or sync unavailable)
+    chrome.storage.local.get(['newsai_api_key', 'newsai_groq_key'], function (localResult) {
+      const localKey = localResult && (localResult.newsai_api_key || localResult.newsai_groq_key);
+      cb(localKey || '');
+    });
+  });
+}
+
+loadSavedKey(function (key) {
   if (key && key.length > 4) {
     setReady(key);
   } else {
@@ -79,8 +92,16 @@ saveBtn.addEventListener('click', function () {
   saveBtn.textContent = 'Saving...';
   saveBtn.className = 'save-btn saving';
 
-  // Store under the same key for backwards compatibility
-  chrome.storage.local.set({ newsai_groq_key: key }, function () {
+  // Save to sync (primary — persists across reloads, reinstalls, devices)
+  // AND local (backup — works when Chrome sync is disabled or offline).
+  const payload = { newsai_api_key: key, newsai_groq_key: key };
+  chrome.storage.sync.set(payload, function () {
+    // Ignore sync errors (quota exceeded, sync disabled) — local backup covers it
+    if (chrome.runtime.lastError) {
+      console.warn('[NewsAI popup] sync.set warning:', chrome.runtime.lastError.message);
+    }
+  });
+  chrome.storage.local.set(payload, function () {
     if (chrome.runtime.lastError) {
       feedback.textContent = '❌ Save failed: ' + chrome.runtime.lastError.message;
       feedback.className = 'feedback err';

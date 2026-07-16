@@ -42,7 +42,7 @@
 
   <div class="dev-banner">
     <strong>🛠 NewsAI Widget Test Page</strong> — Open browser console (F12) to debug.
-    Get a <strong>free</strong> Groq API key at <a href="https://console.groq.com" target="_blank">console.groq.com</a> (no credit card) and paste it in <code>test.html</code> → <code>groqApiKey</code>.
+    Get a <strong>free</strong> Gemini key at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> and paste it in <code>test.html</code> → <code>geminiApiKey</code>.
     The chatbot FAB appears in the bottom-right corner.
   </div>
 
@@ -117,8 +117,12 @@
 
   <!-- ── NewsAI Widget ── -->
   <script>
+    // Auto-detect backend URL — works on localhost AND on Render/any cloud host.
+    // When the page is served by the backend itself (e.g. https://newsai.onrender.com/demo),
+    // window.location.origin is the backend URL. No hardcoding needed.
+    var _backendUrl = window.location.origin;
+
     window.NewsAIConfig = {
-      // Point to your config file (can be a relative path when testing locally)
       config: {
         brand: {
           name: "Eenadu AI",
@@ -130,14 +134,16 @@
         languages: ["te", "en"],
         defaultLanguage: "te",
         sections: ["National", "Telangana", "Andhra Pradesh", "International", "Sports", "Business", "Cinema"],
+        // Backend URL — auto-detected from the page's own origin.
+        // Works on localhost:3001, Render, Railway, or any host.
+        backendUrl: _backendUrl,
         contentSource: {
           type: "rss",
-          url: "http://localhost:3001/api/rss?url=https://www.eenadu.net/rss.xml"
+          // RSS proxy runs on the backend so it avoids browser CORS errors
+          url: _backendUrl + "/api/rss?url=https://www.eenadu.net/rss.xml"
         },
-        // ⬇ Get a FREE key at https://console.groq.com (no credit card needed)
-        groqApiKey: "YOUR_GROQ_API_KEY_HERE",  // Get free at console.groq.com
-        llmProvider: "groq",
-        llmModel: "llama-3.3-70b-versatile",
+        // ⬇ Get a FREE Gemini key at https://aistudio.google.com/apikey
+        geminiApiKey: "YOUR_GEMINI_API_KEY_HERE",
         position: "bottom-right"
       }
     };

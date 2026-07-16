@@ -100,22 +100,68 @@ const TELUGU_SECTION_MAP = [
 ];
 
 /**
- * Expand Telugu query tokens to include English section names.
- * e.g. ["క్రీడలు","వార్తలు"] → ["క్రీడలు","వార్తలు","sports"]
+ * Expand Telugu query tokens to include English section names AND Telugu content keywords.
+ *
+ * Two expansions per matched section:
+ *   1. English section name ("telangana", "sports", "crime", "police") — matches articles
+ *      whose `section` or `tags` field was set to the English section name at ingest time.
+ *   2. ALL Telugu tokens from that section's entry — matches articles whose title/body
+ *      mentions Hyderabad, Warangal, KTR, etc. even if the section label is "General".
+ *      This is essential because RSS feeds often mislabel Telangana articles as "National".
+ *
+ * e.g. "తెలంగాణ వార్తలు"
+ *   → ["తెలంగాణ","వార్తలు","telangana","హైదరాబాద్","వరంగల్","కరీంనగర్","రేవంత్","కేటీఆర్",...]
  */
 function expandTeluguQuery(queryTokens) {
+  const querySet = new Set(queryTokens);
   const extra = [];
   for (const token of queryTokens) {
     for (const entry of TELUGU_SECTION_MAP) {
       if (entry.tokens.some(t => token.includes(t) || t.includes(token))) {
+        // 1. English section name + individual words
         extra.push(entry.section.toLowerCase());
-        // Also push individual words of multi-word sections (e.g. "crime & police" → "crime", "police")
         entry.section.toLowerCase().split(/[\s&]+/).forEach(w => { if (w.length > 2) extra.push(w); });
+        // 2. Telugu content keywords from this section (avoid duplicating the query token itself)
+        entry.tokens.forEach(t => {
+          if (t.length > 3 && !querySet.has(t)) extra.push(t);
+        });
         break;
       }
     }
   }
   return [...queryTokens, ...extra];
+}
+
+/**
+ * Auto-tag an article at ingest time by scanning its title + content
+ * against every TELUGU_SECTION_MAP entry.
+ *
+ * Why: Sakshi's RSS feed often labels Telangana/Sports/Cinema articles as
+ * "General" or "National". URL-based detection fixes the section field, but
+ * content-based auto-tagging adds an extra tag (e.g. "#telangana") so the
+ * article scores +20 on a tag hit instead of only +10 (title) or +2 (content)
+ * when the user queries by section in Telugu.
+ *
+ * The combined text is NOT lowercased — Telugu script has no case, and the
+ * TELUGU_SECTION_MAP tokens are already in the correct script for matching.
+ * English tokens from the map are short (e.g. "telangana") and appear in
+ * Telugu-language articles only when already transliterated — so no case clash.
+ */
+function autoTagArticle(section, title, content) {
+  const combined  = (title || '') + ' ' + (content || '');
+  const baseTag   = `#${section.toLowerCase().replace(/[\s&]+/g, '')}`;
+  const tagSet    = new Set([baseTag]);
+
+  for (const entry of TELUGU_SECTION_MAP) {
+    // Skip if the article is already from this section — tag already added above
+    if (entry.section.toLowerCase().replace(/[\s&]+/g,'') === section.toLowerCase().replace(/[\s&]+/g,'')) continue;
+
+    if (entry.tokens.some(t => combined.includes(t))) {
+      tagSet.add(`#${entry.section.toLowerCase().replace(/[\s&]+/g, '')}`);
+    }
+  }
+
+  return [...tagSet];
 }
 
 // ── Tokenise text into searchable keywords ─────────────────────────────────
@@ -163,8 +209,29 @@ function scoreArticle(article, queryTokens) {
  * Add an article to today's edition.
  * Returns the stored article with its assigned id.
  */
-function addArticle({ title, section, tags = [], content = '', url = '', language = 'te' }) {
+function addArticle({ title, section, tags = [], content = '', url = '', language = 'te', imageUrl = null }) {
   if (!title || !section) throw new Error('title and section are required');
+
+  // Deduplicate: XML auto-poll and per-pageload widget ingest re-send the same
+  // articles repeatedly (Sakshi publishes ≤200/day but polls run every N minutes).
+  // Without this the array grows unbounded with duplicates, and every duplicate
+  // triggers a paid Sarvam TTS prefetch + HF embed. If the incoming copy has
+  // richer content (post-enrichment re-push), update the stored article instead.
+  const normTitle = title.trim();
+  const normUrl   = (url || '').trim();
+  const existing  = articles.find(a =>
+    a.title === normTitle && (a.url === normUrl || (!a.url && !normUrl))
+  );
+  if (existing) {
+    const newContent = (content || '').trim();
+    if (newContent.length > (existing.content || '').length) {
+      existing.content   = newContent;
+      existing.embedding = null; // re-embed with the richer text
+    }
+    // Update imageUrl if we now have one and didn't before
+    if (imageUrl && !existing.imageUrl) existing.imageUrl = imageUrl;
+    return existing;
+  }
 
   const article = {
     id:        ++articleCounter,
@@ -173,6 +240,7 @@ function addArticle({ title, section, tags = [], content = '', url = '', languag
     tags:      Array.isArray(tags) ? tags : [tags],
     content:   content.trim(),
     url:       url.trim(),
+    imageUrl:  imageUrl || null,
     language,
     addedAt:   new Date().toISOString(),
     embedding: null,   // set by /api/embed after HuggingFace batch-embedding
@@ -228,10 +296,15 @@ function queryArticles(question, topN = 30) {
 /**
  * Store a 384-dim embedding vector on an article by ID.
  * Called by the /api/embed background job after HuggingFace processing.
+ * Validates the vector to prevent NaN poisoning of cosine similarity.
  */
 function setEmbedding(articleId, vector) {
+  // Guard: reject malformed, zero-length, or NaN-containing vectors
+  if (!Array.isArray(vector) || vector.length !== 384) return false;
+  if (!vector.every(v => typeof v === 'number' && isFinite(v))) return false;
   const article = articles.find(a => a.id === articleId);
-  if (article) article.embedding = vector;
+  if (article) { article.embedding = vector; return true; }
+  return false;
 }
 
 /**
@@ -244,8 +317,9 @@ function getArticlesForEmbedding() {
     .filter(a => !a.embedding)
     .map(a => ({
       id:   a.id,
-      // Combine title + section + opening content for richer semantic signal
-      text: `${a.title}. ${a.section}. ${(a.content || '').slice(0, 200)}`.trim(),
+      // Combine title + section + opening content for richer semantic signal.
+      // 500 chars gives ~3–4 sentences — enough for MiniLM to understand the article's topic.
+      text: `${a.title}. ${a.section}. ${(a.content || '').slice(0, 500)}`.trim(),
     }));
 }
 
@@ -264,7 +338,8 @@ function getEmbeddingStats() {
 
 /**
  * Cosine similarity between two float arrays.
- * Returns value in [-1, 1]; higher = more similar.
+ * Returns value in [0, 1]; higher = more similar.
+ * Guards against zero/NaN vectors which cause undefined sort order.
  */
 function cosineSimilarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
@@ -274,8 +349,9 @@ function cosineSimilarity(a, b) {
     normA += a[i] * a[i];
     normB += b[i] * b[i];
   }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom > 0 ? dot / denom : 0;
+  const denom = normA * normB;  // guard: if either is zero vector, denom=0
+  if (denom === 0) return 0;    // zero vector → no similarity (not NaN)
+  return dot / Math.sqrt(denom);
 }
 
 /**

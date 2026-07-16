@@ -8,6 +8,40 @@ const MAX_CONTENT_LEN = 10000;  // 10 KB per article body
 const MAX_URL_LEN     = 2000;
 const MAX_TAGS        = 20;
 
+// ── URL-based section override ────────────────────────────────────────────────
+// Same logic as xml-ingest.js. Applied here because the widget DOM-scraper
+// also uses this endpoint, and section labels from the DOM can be incorrect
+// (e.g. Sakshi's Telangana articles may arrive as "General" or "National").
+const URL_SECTION_MAP = [
+  { paths: ['/telangana'],                         section: 'Telangana' },
+  { paths: ['/andhra-pradesh', '/andhra/'],         section: 'Andhra Pradesh' },
+  { paths: ['/sports', '/cricket/'],                section: 'Sports' },
+  { paths: ['/movies', '/cinema', '/entertainmen'], section: 'Cinema' },
+  { paths: ['/business', '/economy', '/finance'],   section: 'Business' },
+  { paths: ['/national', '/india/'],                section: 'National' },
+  { paths: ['/international', '/world/'],           section: 'International' },
+  { paths: ['/politics', '/political'],             section: 'Politics' },
+  { paths: ['/education'],                          section: 'Education' },
+  { paths: ['/agriculture', '/farming'],            section: 'Agriculture' },
+  { paths: ['/crime', '/police/', '/law/'],         section: 'Crime & Police' },
+  { paths: ['/technology', '/tech/', '/cyber'],     section: 'Technology' },
+  { paths: ['/health', '/medical'],                 section: 'Public Health' },
+  { paths: ['/courts', '/legal', '/judiciary'],     section: 'Courts' },
+  { paths: ['/railways', '/railway/', '/metro/'],   section: 'Railways' },
+  { paths: ['/family', '/lifestyle'],               section: 'Family' },
+  { paths: ['/women', '/mahila'],                   section: 'Women' },
+];
+
+function normalizeSectionFromUrl(url, rawSection) {
+  if (url) {
+    const path = url.toLowerCase();
+    for (const entry of URL_SECTION_MAP) {
+      if (entry.paths.some(p => path.includes(p))) return entry.section;
+    }
+  }
+  return rawSection || 'General';
+}
+
 /** POST /api/ingest — add one article to today's edition */
 function ingestArticle(req, res) {
   try {
@@ -32,9 +66,12 @@ function ingestArticle(req, res) {
       tags = [];
     }
 
-    const article = store.addArticle({ title, section, tags, content, url, language });
+    // Override section with URL-derived label when available — more reliable
+    // than what the scraper/RSS provides (Sakshi often tags Telangana articles as General)
+    const resolvedSection = normalizeSectionFromUrl(url, section);
+    const article = store.addArticle({ title, section: resolvedSection, tags, content, url, language });
     const stats   = store.getStats();
-    console.log(`[NewsAI Ingest] ✅ Added: "${title.slice(0, 60)}" [${section}] | Total: ${stats.total}`);
+    console.log(`[NewsAI Ingest] ✅ Added: "${title.slice(0, 60)}" [${resolvedSection}] | Total: ${stats.total}`);
     res.json({ success: true, article, stats });
   } catch (err) {
     res.status(400).json({ error: err.message });

@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: newsai-backend
+    env: node
+    region: singapore   # closest to India — lowest latency for Sakshi readers
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free           # Render free tier — spins down after 15 min idle
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # ── Required API keys — set these in the Render dashboard ──────────────
+      # Gemini (AI chat): https://aistudio.google.com/apikey
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Sarvam (Telugu TTS): https://dashboard.sarvam.ai
+      - key: SARVAM_API_KEY
+        sync: false
+
+      # HuggingFace (semantic search embeddings — optional but recommended)
+      # https://huggingface.co/settings/tokens
+      - key: HF_API_KEY
+        sync: false
+
+      # Admin token — protects /api/articles/reset and /api/analytics/summary
+      # Render generates a random secret for you automatically
+      - key: ADMIN_SECRET
+        generateValue: true

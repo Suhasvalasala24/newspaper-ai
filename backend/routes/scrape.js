@@ -3,9 +3,9 @@
 const fetch   = require('node-fetch');
 const cheerio = require('cheerio');
 
-// Simple in-memory cache (30-minute TTL, max 50 entries)
+// In-memory cache (1-hour TTL, max 50 entries)
 const CACHE     = new Map();
-const CACHE_TTL_MS  = 30 * 60 * 1000;
+const CACHE_TTL_MS  = 60 * 60 * 1000;
 const CACHE_MAX = 50;
 
 /**

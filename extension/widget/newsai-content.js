@@ -605,7 +605,8 @@
       fetch(`${BACKEND_URL}/api/embed`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ hfApiKey: cfg && cfg.hfApiKey }),
+        // Configs use "huggingFaceApiKey" (see configs/eenadu.json) — accept both names
+        body:    JSON.stringify({ hfApiKey: cfg && (cfg.hfApiKey || cfg.huggingFaceApiKey) }),
       }).then(r => r.json())
         .then(d => console.log(`[NewsAI] 🔮 HF embed triggered: ${d.message}`))
         .catch(() => {/* non-critical — keyword search still works */});
