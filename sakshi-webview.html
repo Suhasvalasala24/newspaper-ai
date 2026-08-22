@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="te">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#C0392B" />
+  <title>సాక్షి AI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      background: #f5f5f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans Telugu', sans-serif;
+      /* Prevent iOS rubber-band scroll which looks wrong in a WebView */
+      overscroll-behavior: none;
+    }
+    /* Full-screen wrapper — the widget panel fills the entire WebView */
+    #newsai-app-shell {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Custom top bar matching Sakshi brand */
+    #sakshi-topbar {
+      background: #C0392B;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    #sakshi-topbar img {
+      height: 28px;
+      object-fit: contain;
+      filter: brightness(0) invert(1);
+    }
+    #sakshi-topbar span {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    #sakshi-topbar .badge {
+      margin-left: auto;
+      font-size: 10px;
+      background: rgba(255,255,255,0.25);
+      padding: 2px 8px;
+      border-radius: 10px;
+      letter-spacing: 0.5px;
+    }
+    /* The widget sits in its own scrollable area below the top bar */
+    #newsai-widget-area {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+  </style>
+</head>
+<body>
+
+<div id="newsai-app-shell">
+  <div id="sakshi-topbar">
+    <img src="https://www.sakshi.com/themes/custom/sakshi/assets/images/logo.png"
+         onerror="this.style.display='none'"
+         alt="Sakshi" />
+    <span>సాక్షి AI</span>
+    <span class="badge">AI</span>
+  </div>
+  <div id="newsai-widget-area">
+    <!-- Widget mounts here in full-screen app mode -->
+  </div>
+</div>
+
+<!--
+  ══════════════════════════════════════════════════════════════════════════════
+  NewsAI Widget — Sakshi App Integration
+  ══════════════════════════════════════════════════════════════════════════════
+  This page is loaded inside Sakshi's Android / iOS app WebView.
+  The widget runs in "app mode": no floating button, chat panel fills the screen.
+
+  TO DEPLOY:
+    1. Host this file at:  https://ai.sakshi.com/app  (or any URL you prefer)
+    2. Update BACKEND_URL below to your production backend domain.
+    3. In Sakshi's Android/iOS app, open a WebView pointing to this URL.
+
+  ANDROID (Kotlin):
+    webView.settings.javaScriptEnabled = true
+    webView.settings.domStorageEnabled = true
+    webView.settings.mediaPlaybackRequiresUserGesture = false
+    webView.loadUrl("https://ai.sakshi.com/app")
+
+  IOS (Swift / WKWebView):
+    let config = WKWebViewConfiguration()
+    config.allowsInlineMediaPlayback = true
+    config.mediaTypesRequiringUserActionForPlayback = []
+    let wv = WKWebView(frame: .zero, configuration: config)
+    wv.load(URLRequest(url: URL(string: "https://ai.sakshi.com/app")!))
+  ══════════════════════════════════════════════════════════════════════════════
+-->
+
+<script>
+  // ── Configuration ──────────────────────────────────────────────────────────
+  // Update BACKEND_URL to your production backend before going live.
+  const BACKEND_URL = 'https://ai-api.sakshi.com';
+
+  window.NewsAIConfig = {
+    config: {
+      brand: {
+        name:             'సాక్షి AI',
+        shortName:        'సా',
+        primaryColor:     '#C0392B',
+        logoUrl:          'https://www.sakshi.com/themes/custom/sakshi/assets/images/logo.png',
+        welcomeMessage:   'నమస్కారం! నేను సాక్షి AI. ఈ రోజు వార్తలు, సినిమా, క్రీడలు అన్నీ అడగండి!',
+        welcomeMessageEn: "Hello! I'm Sakshi AI. Ask me anything about today's edition!",
+      },
+      languages:       ['te', 'en'],
+      defaultLanguage: 'te',
+      sections: [
+        'తెలంగాణ', 'ఆంధ్రప్రదేశ్', 'జాతీయం', 'అంతర్జాతీయం',
+        'క్రీడలు', 'సినిమా', 'వ్యాపారం', 'రాజకీయాలు', 'నేరాలు',
+      ],
+      backendUrl: BACKEND_URL,
+      position:   'fullscreen',   // app mode: fills the widget area div
+    },
+  };
+
+  // ── App-mode overrides ─────────────────────────────────────────────────────
+  // After the widget initialises, move the chat panel into #newsai-widget-area
+  // and remove the floating action button. This turns the chat into a native-
+  // feeling full-screen view instead of a popup.
+  window.addEventListener('newsai:ready', function () {
+    const panel = document.getElementById('newsai-panel');
+    const fab   = document.getElementById('newsai-fab');
+    const area  = document.getElementById('newsai-widget-area');
+
+    if (panel && area) {
+      panel.style.cssText = [
+        'position:static',
+        'width:100%',
+        'height:100%',
+        'max-height:100%',
+        'border-radius:0',
+        'border:none',
+        'box-shadow:none',
+        'display:flex',
+        'opacity:1',
+        'transform:none',
+        'pointer-events:auto',
+      ].join(';');
+      area.appendChild(panel);
+    }
+
+    if (fab) fab.style.display = 'none';
+
+    // WebView bridge: post message to native app when a TTS event fires.
+    // Native app can use this to show a "listening" indicator, etc.
+    window.NewsAI = window.NewsAI || {};
+    const _origSpeak = window.NewsAI.speak;
+    if (typeof _origSpeak === 'function') {
+      window.NewsAI.speak = function (...args) {
+        try {
+          // Android: window.SakshiNative.onTTSStart()
+          if (window.SakshiNative?.onTTSStart) window.SakshiNative.onTTSStart();
+          // iOS: window.webkit.messageHandlers.ttsEvent.postMessage('start')
+          if (window.webkit?.messageHandlers?.ttsEvent)
+            window.webkit.messageHandlers.ttsEvent.postMessage('start');
+        } catch (_) {}
+        return _origSpeak.apply(this, args);
+      };
+    }
+  });
+</script>
+
+<!-- Widget scripts — same files as the website embed -->
+<script src="https://ai-api.sakshi.com/widget/newsai-config-loader.js"></script>
+<script src="https://ai-api.sakshi.com/widget/newsai-widget.js" async></script>
+
+</body>
+</html>

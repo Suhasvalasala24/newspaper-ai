@@ -69,7 +69,10 @@ function getSummary(req, res) {
     const istHour = new Date(e.ts + IST_OFFSET_MS).getUTCHours();
     hourCounts[istHour]++;
   }
-  const peakHour = hourCounts.indexOf(Math.max(...hourCounts));
+  // Return null when there are no queries — indexOf(0) on an all-zero array
+  // would falsely report midnight (index 0) as the peak hour.
+  const maxCount = Math.max(...hourCounts);
+  const peakHour = maxCount > 0 ? hourCounts.indexOf(maxCount) : null;
 
   res.json({
     today: {

@@ -42,7 +42,7 @@ const TELUGU_SECTION_MAP = [
   { tokens: ['తెలంగాణ','హైదరాబాద్','సికింద్రాబాద్','వరంగల్','నిజామాబాద్','కరీంనగర్','రేవంత్','కేటీఆర్','రంగారెడ్డి','ఖమ్మం','నల్లగొండ','మహబూబ్‌నగర్','ఆదిలాబాద్','సిద్దిపేట'], section: 'Telangana' },
 
   // Andhra Pradesh / ఆంధ్రప్రదేశ్
-  { tokens: ['ఆంధ్ర','అమరావతి','విజయవాడ','విజాగ్','విశాఖపట్నం','చంద్రబాబు','జగన్','నెల్లూరు','గుంటూరు','తిరుపతి','ఏపీ','ఏపి','కాకినాడ','రాజమండ్రి','కర్నూలు'], section: 'Andhra Pradesh' },
+  { tokens: ['ఆంధ్ర','అమరావతి','విజయవాడ','విజాగ్','విశాఖపట్నం','చంద్రబాబు','జగన్','వైఎస్సార్','వైఎస్సార్సీపీ','వైఎస్‌ జగన్','పవన్ కళ్యాణ్','నెల్లూరు','గుంటూరు','తిరుపతి','ఏపీ','ఏపి','కాకినాడ','రాజమండ్రి','కర్నూలు','పల్నాడు','ప్రకాశం','శ్రీకాకుళం','ఏలూరు','కోనసీమ','ఒంగోలు'], section: 'Andhra Pradesh' },
 
   // National / జాతీయం
   { tokens: ['జాతీయ','భారత్','ఢిల్లీ','కేంద్ర','కేంద్రం','మోదీ','పార్లమెంట్','లోక్‌సభ','రాజ్యసభ','బీజేపీ','కాంగ్రెస్','కేంద్ర ప్రభుత్వం'], section: 'National' },
@@ -57,7 +57,7 @@ const TELUGU_SECTION_MAP = [
   { tokens: ['రాజకీయ','రాజకీయాలు','ఎన్నికలు','మంత్రి','పార్టీ','ముఖ్యమంత్రి','అసెంబ్లీ','ఎమ్మెల్యే','ఎంపీ','ప్రచారం','ఓటు','ఎమ్మెల్సీ','రాజ్యాంగం'], section: 'Politics' },
 
   // Agriculture / వ్యవసాయం
-  { tokens: ['రైతు','వ్యవసాయం','వ్యవసాయ','పంట','రైతన్న','కిసాన్','సాగు','ఎరువు','కరువు','వరి','పత్తి','విత్తనాలు','పంటల','బీమా','కూలీలు'], section: 'Agriculture' },
+  { tokens: ['రైతు','వ్యవసాయం','వ్యవసాయ','పంట','రైతన్న','కిసాన్','సాగు','ఎరువు','కరువు','వరి','పత్తి','విత్తనాలు','పంటల','బీమా','కూలీలు','మత్స్యకార','మత్స్య','మత్స్యపరిశ్రమ','జాలర','జాలర్లు','చేపల','మీనుల'], section: 'Agriculture' },
 
   // Education / విద్య
   { tokens: ['విద్య','పాఠశాల','కళాశాల','విద్యార్థి','విద్యార్థులు','పరీక్ష','పరీక్షలు','ఫలితాలు','ఎంసెట్','ఎంట్రన్స్','అడ్మిషన్','అడ్మిషన్లు','నీట్','జేఈఈ','విశ్వవిద్యాలయం'], section: 'Education' },
@@ -112,23 +112,87 @@ const TELUGU_SECTION_MAP = [
  * e.g. "తెలంగాణ వార్తలు"
  *   → ["తెలంగాణ","వార్తలు","telangana","హైదరాబాద్","వరంగల్","కరీంనగర్","రేవంత్","కేటీఆర్",...]
  */
+// ── English keyword → section mapping ────────────────────────────────────────
+// Users often ask in English ("sports", "cricket", "cinema") while the AI pill
+// is set to Telugu. The scorer only knows section names (English) and Telugu
+// article tokens. Without this map, "sports" matches the section label but NOT
+// the Telugu article titles (క్రికెట్, మ్యాచ్, ఐపీఎల్…) — giving weak results.
+const ENGLISH_SECTION_KEYWORDS = {
+  // Sports
+  sports:'Sports', cricket:'Sports', football:'Sports', tennis:'Sports',
+  badminton:'Sports', hockey:'Sports', kabaddi:'Sports', ipl:'Sports',
+  olympics:'Sports', match:'Sports', tournament:'Sports', medals:'Sports',
+  // Cinema
+  cinema:'Cinema', movies:'Cinema', movie:'Cinema', tollywood:'Cinema',
+  bollywood:'Cinema', ott:'Cinema', trailer:'Cinema', release:'Cinema',
+  // Telangana
+  telangana:'Telangana', hyderabad:'Telangana', secunderabad:'Telangana',
+  // Andhra Pradesh
+  andhra:'Andhra Pradesh', amaravati:'Andhra Pradesh', vijayawada:'Andhra Pradesh',
+  visakhapatnam:'Andhra Pradesh', vizag:'Andhra Pradesh',
+  // National
+  national:'National', india:'National', delhi:'National', parliament:'National',
+  // International
+  international:'International', world:'International', global:'International',
+  america:'International', russia:'International', china:'International',
+  // Business
+  business:'Business', economy:'Business', market:'Business', sensex:'Business',
+  stock:'Business', finance:'Business', budget:'Business',
+  // Politics
+  politics:'Politics', election:'Politics', vote:'Politics', minister:'Politics',
+  // Crime
+  crime:'Crime & Police', police:'Crime & Police', arrest:'Crime & Police',
+  murder:'Crime & Police', theft:'Crime & Police',
+  // Education
+  education:'Education', school:'Education', college:'Education',
+  exam:'Education', results:'Education', admission:'Education',
+  // Agriculture
+  agriculture:'Agriculture', farming:'Agriculture', farmer:'Agriculture',
+  crop:'Agriculture', paddy:'Agriculture',
+  // Health
+  health:'Public Health', hospital:'Public Health', doctor:'Public Health',
+  vaccine:'Public Health', disease:'Public Health',
+  // Technology
+  technology:'Technology', tech:'Technology', cyber:'Technology',
+  mobile:'Technology', internet:'Technology', digital:'Technology',
+  // Courts
+  court:'Courts', courts:'Courts', verdict:'Courts', judge:'Courts',
+  // Railways
+  railway:'Railways', railways:'Railways', train:'Railways', metro:'Railways',
+};
+
+/**
+ * Expand query tokens to maximise article recall:
+ *   1. Telugu tokens → English section name + all Telugu section keywords
+ *   2. English keywords → matching section name + all Telugu section keywords
+ * This makes "sports" retrieve articles titled in Telugu (క్రికెట్, మ్యాచ్…)
+ * and "క్రికెట్" retrieve articles tagged with the English "Sports" label.
+ */
 function expandTeluguQuery(queryTokens) {
   const querySet = new Set(queryTokens);
   const extra = [];
+
   for (const token of queryTokens) {
+    // ── Telugu token → match against TELUGU_SECTION_MAP ──────────────────
     for (const entry of TELUGU_SECTION_MAP) {
       if (entry.tokens.some(t => token.includes(t) || t.includes(token))) {
-        // 1. English section name + individual words
         extra.push(entry.section.toLowerCase());
         entry.section.toLowerCase().split(/[\s&]+/).forEach(w => { if (w.length > 2) extra.push(w); });
-        // 2. Telugu content keywords from this section (avoid duplicating the query token itself)
-        entry.tokens.forEach(t => {
-          if (t.length > 3 && !querySet.has(t)) extra.push(t);
-        });
+        entry.tokens.forEach(t => { if (t.length > 3 && !querySet.has(t)) extra.push(t); });
         break;
       }
     }
+
+    // ── English keyword → look up ENGLISH_SECTION_KEYWORDS ───────────────
+    const sectionName = ENGLISH_SECTION_KEYWORDS[token.toLowerCase()];
+    if (sectionName) {
+      extra.push(sectionName.toLowerCase());
+      sectionName.toLowerCase().split(/[\s&]+/).forEach(w => { if (w.length > 2) extra.push(w); });
+      const entry = TELUGU_SECTION_MAP.find(e => e.section === sectionName);
+      if (entry) entry.tokens.forEach(t => { if (t.length > 3 && !querySet.has(t)) extra.push(t); });
+    }
   }
+
   return [...queryTokens, ...extra];
 }
 
@@ -162,6 +226,18 @@ function autoTagArticle(section, title, content) {
   }
 
   return [...tagSet];
+}
+
+// ── Title normalisation for dedup comparison ──────────────────────────────
+// Strip zero-width characters (U+200B–200D, U+FEFF, NBSP), collapse whitespace,
+// lowercase. Sakshi titles include U+200C (ZWNJ) after certain consonant clusters;
+// an RSS copy omits it while the scraped copy keeps it — causing false mismatches.
+function normForDedup(s) {
+  return (s || '')
+    .replace(/[​-‍﻿ ]/g, '')  // zero-width + NBSP
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 // ── Tokenise text into searchable keywords ─────────────────────────────────
@@ -200,6 +276,17 @@ function scoreArticle(article, queryTokens) {
     while (cidx !== -1 && cnt < 5) { score += 2; cnt++; cidx = contentLower.indexOf(token, cidx + 1); }
   }
 
+  // ── Recency boost — breaking news surfaces above older stories ────────────
+  // addedAt is an ISO string set at ingest time. Within today's reset window:
+  //   <2 hours old → +8 pts  (just published / breaking)
+  //   2–6 hours old → +4 pts  (recent)
+  //   6+ hours old  → +0 pts  (standard)
+  if (article.addedAt && score > 0) {
+    const ageMs = Date.now() - new Date(article.addedAt).getTime();
+    if (ageMs < 2 * 3600 * 1000)       score += 8;
+    else if (ageMs < 6 * 3600 * 1000)  score += 4;
+  }
+
   return score;
 }
 
@@ -217,27 +304,44 @@ function addArticle({ title, section, tags = [], content = '', url = '', languag
   // Without this the array grows unbounded with duplicates, and every duplicate
   // triggers a paid Sarvam TTS prefetch + HF embed. If the incoming copy has
   // richer content (post-enrichment re-push), update the stored article instead.
-  const normTitle = title.trim();
+  const normTitle = normForDedup(title);
   const normUrl   = (url || '').trim();
   const existing  = articles.find(a =>
-    a.title === normTitle && (a.url === normUrl || (!a.url && !normUrl))
+    normForDedup(a.title) === normTitle && (a.url === normUrl || (!a.url && !normUrl))
   );
   if (existing) {
     const newContent = (content || '').trim();
     if (newContent.length > (existing.content || '').length) {
       existing.content   = newContent;
       existing.embedding = null; // re-embed with the richer text
+
+      // BUG FIX: previously tags were NEVER recomputed on the dedup path. An article
+      // first ingested with a thin RSS summary got few auto-tags; when the enriched
+      // full body arrived later it kept the stale tag set, so section queries that the
+      // richer text would now match (e.g. "#telangana" from a Hyderabad mention deep in
+      // the body) never fired. Re-run auto-tagging on the richer text and MERGE (never
+      // drop caller/earlier tags — union only).
+      const freshAuto = autoTagArticle(existing.section, existing.title, newContent);
+      existing.tags   = [...new Set([...existing.tags, ...freshAuto])];
     }
     // Update imageUrl if we now have one and didn't before
     if (imageUrl && !existing.imageUrl) existing.imageUrl = imageUrl;
     return existing;
   }
 
+  // Enrich tags: start with any caller-supplied tags, then auto-expand by
+  // scanning title + content against TELUGU_SECTION_MAP. This means an article
+  // about "హైదరాబాద్" labelled "General" still gets a "#telangana" tag, so
+  // queries for "తెలంగాణ వార్తలు" score +20 (tag hit) instead of only +2 (content).
+  const suppliedTags = Array.isArray(tags) ? tags : (tags ? [tags] : []);
+  const autoTags     = autoTagArticle(section.trim(), title, content);
+  const mergedTags   = [...new Set([...autoTags, ...suppliedTags])];
+
   const article = {
     id:        ++articleCounter,
     title:     title.trim(),
     section:   section.trim(),
-    tags:      Array.isArray(tags) ? tags : [tags],
+    tags:      mergedTags,
     content:   content.trim(),
     url:       url.trim(),
     imageUrl:  imageUrl || null,
@@ -404,6 +508,91 @@ function queryHybrid(question, queryVector, topN = 8) {
 function resetArticles() {
   articles.length = 0;
   articleCounter  = 0;
+}
+
+/**
+ * Remove articles older than maxAgeHours.
+ *
+ * Called at the start of each doScrape() cycle so the store never accumulates
+ * yesterday's articles across scrape intervals. Articles without an addedAt
+ * timestamp are treated as old and removed (safe default).
+ *
+ * Returns { removed, remaining } for logging.
+ */
+function pruneOldArticles(maxAgeHours = 24) {
+  const cutoff  = Date.now() - maxAgeHours * 60 * 60 * 1000;
+  const before  = articles.length;
+  // Mutate in-place — splice backwards to avoid index shifting
+  for (let i = articles.length - 1; i >= 0; i--) {
+    const a = articles[i];
+    const ts = a.addedAt ? new Date(a.addedAt).getTime() : 0;
+    if (ts < cutoff) articles.splice(i, 1);
+  }
+  const removed   = before - articles.length;
+  const remaining = articles.length;
+  if (removed > 0) {
+    console.log(`[NewsAI Store] 🗑️  Pruned ${removed} articles older than ${maxAgeHours}h — ${remaining} remain`);
+  }
+  return { removed, remaining };
+}
+
+// ── Disk persistence ──────────────────────────────────────────────────────────
+// Saves the article store to a JSON file so articles survive backend restarts.
+// Call saveToFile() after bulk ingests; loadFromFile() at server startup.
+
+const fs   = require('fs');
+const path = require('path');
+
+function saveToFile(filePath) {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    // Omit embedding vectors — they're large float arrays and HF re-generates them anyway.
+    const slim = articles.map(a => {
+      const { embedding: _, ...rest } = a;
+      return rest;
+    });
+    fs.writeFileSync(filePath, JSON.stringify({ articles: slim, articleCounter }, null, 0), 'utf8');
+    console.log(`[NewsAI Store] 💾 Saved ${slim.length} articles to disk`);
+  } catch (err) {
+    console.warn('[NewsAI Store] Save failed:', err.message);
+  }
+}
+
+function loadFromFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    const raw  = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.articles) || data.articles.length === 0) return 0;
+    articles.length = 0;
+    articleCounter  = typeof data.articleCounter === 'number' ? data.articleCounter : 0;
+    for (const a of data.articles) {
+      if (a && a.title && a.section) {
+        articles.push({
+          ...a,
+          // Ensure tags is always an array — older/corrupted disk cache may omit it,
+          // causing scoreArticle()'s tags.map() to throw and crash the /api/ai route.
+          tags:      Array.isArray(a.tags) ? a.tags : [],
+          embedding: null,
+        });
+      }
+    }
+    console.log(`[NewsAI Store] 📂 Loaded ${articles.length} articles from disk cache`);
+    return articles.length;
+  } catch (err) {
+    console.warn('[NewsAI Store] Load failed:', err.message);
+    return 0;
+  }
+}
+
+function clearFile(filePath) {
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    console.log('[NewsAI Store] 🗑️  Disk cache cleared');
+  } catch (err) {
+    console.warn('[NewsAI Store] Clear file failed:', err.message);
+  }
 }
 
 /**
@@ -674,10 +863,20 @@ module.exports = {
   getStats,
   queryArticles,
   queryHybrid,
+  cosineSimilarity,
   resetArticles,
+  pruneOldArticles,
   loadSampleArticles,
+  // Disk persistence
+  saveToFile,
+  loadFromFile,
+  clearFile,
   // Embedding API
   setEmbedding,
   getArticlesForEmbedding,
   getEmbeddingStats,
+  // Section vocabulary — exported so routes (ai.js) can test section relevance
+  // against the SAME token lists used for auto-tagging at ingest time.
+  TELUGU_SECTION_MAP,
+  ENGLISH_SECTION_KEYWORDS,
 };

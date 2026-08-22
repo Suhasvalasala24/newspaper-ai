@@ -19,6 +19,6 @@
     "type": "rss",
     "url": "https://yourpaper.com/rss.xml"
   },
-  "anthropicApiKey": "REPLACE_WITH_ANTHROPIC_KEY",
+  "_note": "API keys belong in backend/.env (GEMINI_API_KEY, SARVAM_API_KEY). Never put real keys in this config file — it ships with the widget to the browser.",
   "position": "bottom-right"
 }

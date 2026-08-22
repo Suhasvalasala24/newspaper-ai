@@ -15,19 +15,89 @@
   let isSpeaking = false;
   let currentUtterance = null;
   let speakingMsgEl = null;
+  let speakGen = 0; // incremented on every startSpeaking call; stale resetBtn closures check this
   let recognition = null;
   let isListening = false;
   let voiceInputActive = false; // true when current message came from mic
+  let lastArticleMeta = [];     // {url,title,imageUrl}[] from the SSE 'meta' event — drives image strip
+  let _lastStreamComplete = true; // false while an SSE stream is mid-flight; set true on [DONE]
+  let _restoredFromSession = false; // true when conversationHistory was restored from sessionStorage
   const MAX_HISTORY = 4;  // keep last 4 exchanges — saves ~1200+ tokens per request
   let promptCount = 0;  // increments on each user message; non-skippable ad every 3rd
   let backendBaseUrl = 'http://localhost:3001'; // overridden from config.backendUrl in init()
+
+  // ─── Session ID (Feature: per-user prompt context memory) ────────────────
+  // Stable session ID — sent with every chat request so the backend can track
+  // user interests and provide better context-aware answers.
+  const sessionId = (() => {
+    try {
+      let id = sessionStorage.getItem('newsai_session');
+      if (!id) { id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2); sessionStorage.setItem('newsai_session', id); }
+      return id;
+    } catch (_) { return Math.random().toString(36).slice(2); }
+  })();
+
+  // ─── Conversation persistence (survives tab close, auto-clears tomorrow) ─────
+  // sessionStorage clears on tab close; this localStorage layer keeps the last
+  // few turns across sessions and auto-expires by keying on the date.
+  // Date key uses IST (UTC+5:30) so history rolls at midnight IST, not UTC midnight (5:30 AM IST).
+  const HISTORY_KEY = 'newsai_history_' + new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+
+  function saveHistory() {
+    try {
+      // Only save last 10 turns (5 Q+A pairs) — don't bloat storage
+      const toSave = conversationHistory.slice(-10);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(toSave));
+      // Clean up yesterday's key(s)
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith('newsai_history_') && k !== HISTORY_KEY) localStorage.removeItem(k);
+      }
+    } catch (_) {}  // private browsing / storage full — silent
+  }
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return;
+      const h = JSON.parse(raw);
+      if (Array.isArray(h) && h.length > 0) conversationHistory = h;
+    } catch (_) {}
+  }
+
+  // ─── Podcast-style continuous voice mode (Feature: hands-free conversation) ──
+  let voiceMode = false;          // true = podcast mode active
+  let voiceSilenceTimer = null;   // auto-submit after silence
+  let voiceModeEl = null;         // the overlay DOM element
+  let voiceProcessing = false;    // true while AI is thinking/speaking (blocks auto-restart)
+  const VOICE_SILENCE_MS = 1500;  // 1.5s silence → auto submit
+  let widgetEl = null;            // module ref to el, set in buildWidget — used by voice mode
+  let widgetConfig = null;        // module ref to config, set in buildWidget
+
+  // ─── Breaking news check (Feature: fresh-article badge on panel open) ────
+  let _breakingLastChecked = 0;
+  const BREAKING_CHECK_INTERVAL = 5 * 60 * 1000; // 5 min client-side debounce — avoids hammering backend
 
   // ─── Gemini context cache (Feature: backend caching) ─────────────────────
   let geminiCacheId     = null;  // resource name, e.g. "cachedContents/abc123"
   let geminiCacheExpiry = 0;     // epoch ms
 
   // ─── Daily digest cache (Feature: pre-generated digest) ──────────────────
-  let dailyDigest = { te: null, en: null };
+  let dailyDigest  = { te: null, en: null };
+  let todaySections = [];  // sections from today's articles — drives dynamic chips
+
+  // Maps backend section name → chip label in each language.
+  // Only sections that have a mapping here will become chips.
+  const SECTION_CHIP_LABELS = {
+    'Telangana':      { te: 'తెలంగాణ వార్తలు',       en: 'Telangana news' },
+    'Andhra Pradesh': { te: 'ఆంధ్రప్రదేశ్‌ వార్తలు', en: 'AP news' },
+    'Sports':         { te: 'క్రీడా వార్తలు',           en: 'Sports news' },
+    'Cinema':         { te: 'సినిమా వార్తలు',            en: 'Cinema news' },
+    'Business':       { te: 'వ్యాపార వార్తలు',           en: 'Business news' },
+    'International':  { te: 'అంతర్జాతీయ వార్తలు',       en: 'World news' },
+    'National':       { te: 'జాతీయ వార్తలు',             en: 'National news' },
+    'Politics':       { te: 'రాజకీయ వార్తలు',            en: 'Politics news' },
+    'Crime & Police': { te: 'నేర వార్తలు',                en: 'Crime news' },
+  };
 
   // ─── Font size preference (Feature: A/A+ control) ────────────────────────
   let fontSizePref = 'normal'; // 'normal' | 'large'
@@ -173,11 +243,17 @@
       if (saved) {
         const parsed = JSON.parse(saved);
         // Corrupted storage could hold a non-array — that would crash .push/.filter later
-        if (Array.isArray(parsed)) conversationHistory = parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          conversationHistory = parsed;
+          _restoredFromSession = true;  // triggers "Previous conversation restored" notice on first render
+        }
       }
       const savedLang = sessionStorage.getItem('newsai_lang');
       if (savedLang && (savedLang === 'te' || savedLang === 'en')) currentLang = savedLang;
     } catch (_) {}
+
+    // Note: localStorage history persistence removed — history now clears when the tab closes.
+    // sessionStorage (above) keeps it alive for same-tab reloads only.
 
     const wrapper = document.createElement('div');
     wrapper.className = 'newsai-wrapper' + (position === 'bottom-left' ? ' newsai-pos-left' : '');
@@ -339,7 +415,54 @@
     // Init voice
     initVoice(el);
 
+    // Expose refs for podcast voice mode (needs el + config outside this scope)
+    widgetEl = el;
+    widgetConfig = config;
+
     return el;
+  }
+
+  // ─── Breaking news badge ────────────────────────────────────────────────────
+  // Fetches /api/articles/today and injects a "🔴 Breaking" chip above the
+  // suggestion chips if any article was ingested in the last 10 minutes.
+  // A 5-min client-side debounce prevents hammering the backend on repeated opens.
+  function checkBreakingNews(el) {
+    const now = Date.now();
+    if (now - _breakingLastChecked < BREAKING_CHECK_INTERVAL) return;
+    _breakingLastChecked = now;
+
+    // Use the lightweight breaking-count endpoint (not /api/articles/today) — it
+    // returns only counts + addedAt, avoiding downloading all article bodies/images.
+    fetch(backendBaseUrl + '/api/articles/breaking-count', { signal: AbortSignal.timeout(4000) })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data || typeof data.count !== 'number') return;
+        const breaking = data.articles || [];
+        if (breaking.length === 0) return;
+
+        // Find the chips container inside the welcome message
+        const chipsEl = el.messages.querySelector('#newsai-chips');
+        if (!chipsEl) return;
+        // Don't inject twice
+        if (chipsEl.previousElementSibling &&
+            chipsEl.previousElementSibling.classList.contains('newsai-breaking-banner')) return;
+
+        const count = breaking.length;
+        const label = currentLang === 'te'
+          ? '🔴 ' + count + ' తాజా వార్త' + (count === 1 ? '' : 'లు') + ' వచ్చాయి'
+          : '🔴 ' + count + ' breaking ' + (count === 1 ? 'story' : 'stories') + ' just in';
+
+        const banner = document.createElement('button');
+        banner.className = 'newsai-breaking-banner newsai-chip';
+        banner.textContent = label;
+        banner.addEventListener('click', function() {
+          el.input.value = currentLang === 'te' ? 'తాజా బ్రేకింగ్ న్యూస్ ఏమిటి?' : 'What are the latest breaking news?';
+          el.send.disabled = false;
+          submitMessage(el, widgetConfig);
+        });
+        chipsEl.parentNode.insertBefore(banner, chipsEl);
+      })
+      .catch(function() {});
   }
 
   // ─── Panel open/close ──────────────────────────────────────────────────────
@@ -360,16 +483,6 @@
       })
       .catch(() => {});
 
-    // Fetch digest in background — used in renderWelcome if available
-    fetch(backendBaseUrl + '/api/digest', { signal: AbortSignal.timeout(3000) })
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (data && data.ready) {
-          dailyDigest = { te: data.te || null, en: data.en || null };
-        }
-      })
-      .catch(() => {});
-
     // Render welcome or restore session — only into an EMPTY container.
     // The messages live in the DOM across close/reopen; re-rendering on every
     // open duplicated the welcome card / entire history each time.
@@ -380,6 +493,8 @@
         restoreMessages(el, conversationHistory);
       }
     }
+    // Check for fresh articles and inject a breaking news badge if found
+    checkBreakingNews(el);
     setTimeout(() => el.input.focus(), 300);
   }
 
@@ -393,9 +508,7 @@
   function renderWelcome(el, config) {
     const { brand } = config;
     const welcome = currentLang === 'te' ? brand.welcomeMessage : brand.welcomeMessageEn;
-    const chips = currentLang === 'te'
-      ? ['ఈ రోజు ముఖ్య వార్తలు', 'క్రికెట్‌ స్కోర్‌', 'సినిమా వార్తలు', 'తెలంగాణ వార్తలు', 'ఆంధ్రప్రదేశ్‌ వార్తలు']
-      : ['Top headlines today', 'Cricket score', 'Cinema news', 'Telangana news', 'Andhra Pradesh news'];
+    const chips = _buildChips(todaySections);
 
     const sampleCards = currentLang === 'te'
       ? [
@@ -422,23 +535,18 @@
         '</div>'
       : '';
 
-    // Pre-generated digest — shown if available, collapsed by default
+    // Pre-generated digest — shown expanded immediately if ready; loading slot otherwise
     const digestText = dailyDigest[currentLang] || null;
+    const digestLabel = currentLang === 'te' ? '📰 ఈ రోజు ముఖ్యాంశాలు' : '📰 Today\'s Highlights';
     const digestHtml = digestText
-      ? `<div class="newsai-digest-card" id="newsai-digest-card">
-          <div class="newsai-digest-header" id="newsai-digest-toggle">
-            <span>${currentLang === 'te' ? '📰 ఈ రోజు సారాంశం' : '📰 Today\'s Digest'}</span>
-            <span class="newsai-digest-arrow">▾</span>
-          </div>
-          <div class="newsai-digest-body" id="newsai-digest-body" style="display:none">
-            ${renderBotText(digestText.slice(0, 500) + (digestText.length > 500 ? '…' : ''))}
-            ${digestText.length > 500
-              ? `<button class="newsai-digest-more" id="newsai-digest-expand">
-                  ${currentLang === 'te' ? 'మరింత చదవండి →' : 'Read more →'}
-                </button>` : ''}
-          </div>
+      ? `<div class="newsai-digest-content">
+          <div class="newsai-digest-label">${digestLabel}</div>
+          ${renderBotText(digestText)}
         </div>`
-      : '';
+      : `<div id="newsai-digest-slot" class="newsai-digest-slot">
+          <div class="newsai-digest-label">${digestLabel}</div>
+          <span class="newsai-digest-loading-text">${currentLang === 'te' ? 'లోడవుతోంది…' : 'Loading today\'s highlights…'}</span>
+        </div>`;
 
     const msgEl = document.createElement('div');
     msgEl.className = 'newsai-msg newsai-msg-bot';
@@ -446,13 +554,13 @@
       <div class="newsai-bubble">
         ${escHtml(welcome)}
         ${digestHtml}
-        <div class="newsai-news-cards">
+        ${!digestText ? `<div class="newsai-news-cards">
           ${sampleCards.map(c => `
             <div class="newsai-news-card">
               <div class="newsai-news-card-section">${c.section}</div>
               <div class="newsai-news-card-headline">${c.headline}</div>
             </div>`).join('')}
-        </div>
+        </div>` : ''}
         <div class="newsai-chips" id="newsai-chips">
           ${chips.map(c => `<button class="newsai-chip">${c}</button>`).join('')}
         </div>
@@ -461,31 +569,10 @@
       <div style="display:flex;align-items:center;gap:4px">
         ${makeSpeakBtn(welcome)}
         ${makeShareBtn(welcome)}
-        <button class="newsai-copy-btn" title="Copy" aria-label="Copy message">${ICONS.copy}</button>
+        <button class="newsai-copy-btn" data-text="${escAttr(digestText || welcome)}" title="Copy" aria-label="Copy message">${ICONS.copy}</button>
         <span class="newsai-msg-time">${timeStr()}</span>
       </div>
     `;
-
-    // Wire digest toggle + expand
-    if (digestText) {
-      const toggle = msgEl.querySelector('#newsai-digest-toggle');
-      const body   = msgEl.querySelector('#newsai-digest-body');
-      const arrow  = msgEl.querySelector('.newsai-digest-arrow');
-      if (toggle && body) {
-        toggle.addEventListener('click', () => {
-          const open = body.style.display !== 'none';
-          body.style.display = open ? 'none' : 'block';
-          if (arrow) arrow.textContent = open ? '▾' : '▴';
-        });
-      }
-      const expandBtn = msgEl.querySelector('#newsai-digest-expand');
-      if (expandBtn && body) {
-        expandBtn.addEventListener('click', () => {
-          body.innerHTML = renderBotText(digestText);
-          expandBtn.remove();
-        });
-      }
-    }
     el.messages.appendChild(msgEl);
     wireCopy(msgEl);
     wireShare(msgEl);
@@ -493,21 +580,108 @@
     // Wire chips
     msgEl.querySelectorAll('.newsai-chip').forEach(chip => {
       chip.addEventListener('click', () => {
-        el.input.value = chip.textContent;
+        el.input.value = _chipQuery(chip.textContent);
         el.send.disabled = false;
         submitMessage(el, config);
       });
     });
 
     wireSpeak(msgEl);
+
+    // Pre-warm disabled: Sarvam free credits exhausted — re-enable when credits replenished.
+    // prewarmTts(welcome, currentLang);
+  }
+
+  // ─── Inject digest into welcome slot once async pre-fetch resolves ──────────
+  function _injectDigest(text) {
+    if (!text) return;
+    const slot = document.getElementById('newsai-digest-slot');
+    if (!slot) return;  // panel not open yet — renderWelcome will use dailyDigest directly next time
+    const bubble = slot.closest('.newsai-bubble');
+    if (bubble) {
+      const cards = bubble.querySelector('.newsai-news-cards');
+      if (cards) cards.remove();  // remove loading placeholder cards
+    }
+    const label = currentLang === 'te' ? '📰 ఈ రోజు ముఖ్యాంశాలు' : '📰 Today\'s Highlights';
+    slot.outerHTML =
+      `<div class="newsai-digest-content">
+        <div class="newsai-digest-label">${label}</div>
+        ${renderBotText(text)}
+      </div>`;
+  }
+
+  // ─── Resolve a chip label to the actual query text sent to the AI ───────────
+  // Chip buttons show display labels like "More news →" — sending that verbatim
+  // to the AI is meaningless. Strip the trailing arrow and map the "More news"
+  // chip to a real headline request.
+  function _chipQuery(label) {
+    const clean = (label || '').replace(/\s*→\s*$/, '').trim();
+    if (clean === 'More news' || clean === 'ఇంకా వార్తలు') {
+      return currentLang === 'te' ? 'ఈ రోజు మరిన్ని వార్తలు చూపించు' : 'Show me more headlines';
+    }
+    return clean;
+  }
+
+  // ─── Build chip list from today's sections (or hardcoded fallback) ──────────
+  function _buildChips(sections) {
+    const firstChip = currentLang === 'te' ? 'ఈ రోజు ముఖ్య వార్తలు' : 'Top headlines today';
+    const moreChip  = currentLang === 'te' ? 'ఇంకా వార్తలు →' : 'More news →';
+    const fallback  = currentLang === 'te'
+      ? [firstChip, 'క్రికెట్‌ స్కోర్‌', 'సినిమా వార్తలు', 'తెలంగాణ వార్తలు', 'ఆంధ్రప్రదేశ్‌ వార్తలు', moreChip]
+      : [firstChip, 'Cricket score', 'Cinema news', 'Telangana news', 'AP news', moreChip];
+
+    if (!sections || !sections.length) return fallback;
+
+    const sectionChips = sections
+      .filter(s => s && SECTION_CHIP_LABELS[s])
+      .slice(0, 4)
+      .map(s => SECTION_CHIP_LABELS[s][currentLang]);
+
+    return sectionChips.length
+      ? [firstChip, ...sectionChips, moreChip]
+      : fallback;
+  }
+
+  // ─── Inject section chips into welcome once sections arrive from digest ──────
+  function _injectSectionChips(sections) {
+    const chipsEl = document.getElementById('newsai-chips');
+    if (!chipsEl || chipsEl.classList.contains('newsai-chips-hidden')) return;
+    const newChips = _buildChips(sections);
+    chipsEl.innerHTML = newChips.map(c => `<button class="newsai-chip">${c}</button>`).join('');
+    chipsEl.querySelectorAll('.newsai-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const inp  = document.getElementById('newsai-input');
+        const send = document.getElementById('newsai-send');
+        if (inp)  { inp.value = _chipQuery(chip.textContent); inp.dispatchEvent(new Event('input')); }
+        if (send) { send.disabled = false; send.click(); }
+      });
+    });
   }
 
   // ─── Restore session messages ────────────────────────────────────────────────
   function restoreMessages(el, history) {
     history.forEach(msg => {
+      // restored=true: appendMessage never auto-plays TTS (only submitMessage does), so this
+      // simply re-renders past turns silently — user messages plain, assistant via renderBotText.
       appendMessage(el.messages, msg.role === 'user' ? 'user' : 'bot', msg.content, false);
     });
     scrollToBottom(el.messages);
+    // Subtle, auto-dismissing notice that the previous conversation was recovered
+    if (_restoredFromSession) {
+      _restoredFromSession = false;
+      showRestoreNotice(el.messages);
+    }
+  }
+
+  // Small italic notice at the top of the chat; fades itself out after 3 seconds.
+  function showRestoreNotice(container) {
+    const notice = document.createElement('div');
+    notice.className = 'newsai-restore-notice';
+    notice.textContent = currentLang === 'te'
+      ? '↩ మునుపటి సంభాషణ పునరుద్ధరించబడింది'
+      : '↩ Previous conversation restored';
+    container.insertBefore(notice, container.firstChild);
+    setTimeout(() => { try { notice.remove(); } catch (_) {} }, 3000);
   }
 
   // ─── Append a message bubble ─────────────────────────────────────────────────
@@ -521,7 +695,7 @@
         '<div style="display:flex;align-items:center;gap:4px">' +
           makeSpeakBtn(text) +
           makeShareBtn(text) +
-          '<button class="newsai-copy-btn" title="Copy" aria-label="Copy message">' + ICONS.copy + '</button>' +
+          '<button class="newsai-copy-btn" data-text="' + escAttr(text) + '" title="Copy" aria-label="Copy message">' + ICONS.copy + '</button>' +
           '<span class="newsai-msg-time">' + timeStr() + '</span>' +
         '</div>';
       wireSpeak(msgEl);
@@ -535,7 +709,14 @@
     }
 
     container.appendChild(msgEl);
-    if (scroll) scrollToBottom(container);
+    if (scroll) {
+      if (role === 'bot') {
+        // Scroll so the TOP of the new message is visible — user reads from the start
+        requestAnimationFrame(() => { msgEl.scrollIntoView({ block: 'start', behavior: 'smooth' }); });
+      } else {
+        scrollToBottom(container);
+      }
+    }
     return msgEl;
   }
 
@@ -544,7 +725,7 @@
     const el = document.createElement('div');
     el.className = 'newsai-msg newsai-msg-bot';
     el.id = 'newsai-typing';
-    el.innerHTML = `<div class="newsai-typing"><span></span><span></span><span></span></div>`;
+    el.innerHTML = `<div class="newsai-thinking-bubble"><div class="newsai-typing-dots"><span></span><span></span><span></span></div></div>`;
     container.appendChild(el);
     scrollToBottom(container);
     return el;
@@ -562,7 +743,7 @@
     if (text) {
       el.innerHTML = `<div class="newsai-typing-status">${text}</div>`;
     } else {
-      el.innerHTML = `<div class="newsai-typing"><span></span><span></span><span></span></div>`;
+      el.innerHTML = `<div class="newsai-thinking-bubble"><div class="newsai-typing-dots"><span></span><span></span><span></span></div></div>`;
     }
   }
 
@@ -659,12 +840,214 @@
     });
   }
 
+  // ─── Auto-language detection ──────────────────────────────────────────────
+  // If the user types in Telugu script but the pill is set to English (or vice
+  // If the user types in Telugu script while the pill is on English, auto-switch
+  // to Telugu for this query only (restores after). Never switch away from Telugu
+  // — users on the Telugu pill often type in English (no Telugu keyboard in Chrome)
+  // and still expect a Telugu response.
+  // Telugu chars are in Unicode range U+0C00–U+0C7F.
+  function detectQueryLang(text) {
+    const teluguChars = (text.match(/[ఀ-౿]/g) || []).length;
+    const totalChars  = text.replace(/\s/g, '').length || 1;
+    const teluguRatio = teluguChars / totalChars;
+    // Only auto-upgrade English pill → Telugu when user clearly typed Telugu script
+    if (teluguRatio > 0.25 && currentLang === 'en') return 'te';
+    // Never downgrade: if pill is 'te', always respond in Telugu even for English queries
+    return currentLang;
+  }
+
+  // ─── TTS text preparation ─────────────────────────────────────────────────
+  // The DISPLAY path (renderBotText) strips internal markers, headline echoes,
+  // and auto-bolds. The TTS path historically received the RAW Gemini text and
+  // spoke ALL of it — including cross-contaminated bodies, photo-gallery article
+  // lines, and the UI closing prompt. prepareForTTS() performs the equivalent
+  // sanitisation for spoken output. Applied EVERYWHERE text reaches Sarvam TTS
+  // or the Web Speech API (startSpeaking + feedLiveTts).
+  function prepareForTTS(text) {
+    if (!text) return '';
+    let out = String(text);
+
+    // 1. Strip **bold** / *italic* markdown markers (keep inner text)
+    out = out.replace(/\*\*([^*\n]+)\*\*/g, '$1').replace(/\*([^*\n]+)\*/g, '$1');
+
+    // 1a. Drop horizontal-rule / separator lines BEFORE the dash→period conversion below.
+    // ORDER IS CRITICAL: a line like "———" or "---" hit rule 1b first, turning each dash
+    // into its own ". " — the resulting ". . . " was then read aloud by Sarvam as
+    // "dot dot dot" at the head of the response. Stripping the line first removes the
+    // source entirely. (The old step 5c ran too late to ever match.)
+    out = out.replace(/^[ \t]*[-—–_=~]{2,}[ \t]*$/gm, '');
+
+    // 1b. Convert list-format separators to spoken pauses.
+    // Em dash (—) and en dash (–) are used as the article list separator in the AI response.
+    // When Sarvam reads "Headline — description" it sounds like "Headline dash description".
+    // Replacing with ". " makes it sound like two natural sentences instead.
+    // ASCII hyphens in proper nouns (e.g. "BJP-led") are NOT affected (they have no spaces).
+    out = out.replace(/\s*[—–]\s*/g, '. ');
+
+    // 1c. Normalise dot sequences that Sarvam vocalises instead of pausing on.
+    //   • "…" (U+2026) is ONE character — `\.{2,}` never matched it, and Sarvam
+    //     expands it to three spoken dots.
+    //   • ". . ." — isolated punctuation separated by spaces (left over from 1b when a
+    //     dash was used as a bullet) is read mark-by-mark.
+    out = out
+      .replace(/[…⋯᠁]/g, ',')
+      .replace(/\.{2,}/g, ',')
+      .replace(/(?:[.,;:]\s+){2,}[.,;:]?\s*/g, '. ');
+
+    // 2. Strip internal content markers Gemini occasionally echoes
+    out = out
+      .replace(/\[HEADLINE ONLY[^\]]*\]/gi, '')
+      .replace(/ ?[—–] ?\(same as headline[^)]*\)/gi, '')
+      .replace(/\(same as headline[^)]*\)/gi, '')
+      .replace(/ ?[—–] ?\(not available\)/gi, '')
+      .replace(/\(not available\)/gi, '');
+
+    // 3. Strip exact headline echo "Headline — Headline" (normalized match) —
+    //    same logic as renderBotText: Gemini repeats the headline as its own body.
+    const norm = s => s
+      .replace(/[\u200B-\u200F\u00AD\uFEFF\u2028\u2029]/g, '')
+      .replace(/[.!?…]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    out = out.replace(/^(.+?)\s*[—–]\s*(.+)$/gm, (m, head, desc) =>
+      norm(desc) === norm(head) ? head.trim() : m);
+
+    // 4. Drop photo-gallery article lines entirely — never speak them aloud
+    const galleryLine = /ఫోటోలు|ఫొటోలు|\(photos?\)|photo gallery|gallery|ఫోటో గ్యాలరీ|గ్యాలరీ/i;
+    out = out.split('\n').filter(line => !galleryLine.test(line)).join('\n');
+
+    // 5. Strip the UI closing-prompt line — interface text, not news content
+    out = out
+      .replace(/^.*ఏ వార్త పూర్తి వివరాలు కావాలో అడగండి.*$/gm, '')
+      // Second Telugu closing-prompt variant Gemini emits ("…మరింత తెలుసుకోవాలంటే అడగండి").
+      // Matched both as a whole line and as a trailing tail of the last line, because it
+      // is often appended to the final news sentence rather than placed on its own line.
+      .replace(/^.*ఏ వార్త గురించి మరింత తెలుసుకోవాలంటే అడగండి.*$/gm, '')
+      .replace(/ఏ వార్త గురించి మరింత తెలుసుకోవాలంటే అడగండి\.?\s*$/u, '')
+      .replace(/^.*Ask me which story you would like the full details for.*$/gim, '');
+
+    // 5b. Strip emoji-only section header lines (e.g. "🏏 Sports", "🎬 Cinema", "📰 National")
+    out = out.replace(/^[\u{1F000}-\u{1FFFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]\s*\S{1,20}$/gmu, '');
+
+    // 5c. (Separator lines are now stripped in step 1a — see the ORDER note there.)
+
+    // 6. Collapse stray/blank lines: trailing spaces + 3+ newlines → single blank
+    out = out.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+
+    // 7. Never let the spoken text OPEN with punctuation. Sarvam reads a leading
+    //    "." as "dot" and a leading "—" as "dash" before the first real word.
+    out = out.replace(/^[\s.,;:!?।॥…·•*_=~\-–—]+/, '');
+
+    return out;
+  }
+
+  // ─── TTS cache pre-warm (fire-and-forget) ───────────────────────────────────
+  // Called on widget open with the opening/welcome text. Warms the backend Sarvam
+  // TTS cache so the first speaker tap plays instantly. Best-effort ONLY: never
+  // blocks, never throws, never touches the UI.
+  // NOTE (divergence from spec): this codebase has no `window.NewsAI._config`; the
+  // real "Sarvam available?" signal is `backendTtsAvailable` and the endpoint is
+  // `backendBaseUrl + '/api/tts/stream'` (widget embeds on remote domains).
+  const _prewarmedTts = new Set();   // dedupe by lang+text so reopens don't re-fire
+  function prewarmTts(text, lang) {
+    try {
+      if (!text || typeof window === 'undefined') return;
+      // Only pre-warm when the Sarvam backend hasn't been marked unavailable
+      // (i.e. we're not stuck on the Web Speech fallback tier).
+      if (typeof backendTtsAvailable !== 'undefined' && backendTtsAvailable === false) return;
+      const prepared = prepareForTTS(text);
+      if (!prepared || prepared.length < 10) return;
+      const key = (lang || '') + ':' + prepared;
+      if (_prewarmedTts.has(key)) return;   // already warmed this session
+      _prewarmedTts.add(key);
+      // Fire-and-forget: backend caches the synthesised audio. We don't play it.
+      const _prewarmVoice = (widgetConfig && widgetConfig.ttsVoice) || undefined;
+      fetch(backendBaseUrl + '/api/tts/stream', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ text: prepared, lang: lang === 'en' ? 'en' : 'te', voice: _prewarmVoice }),
+      }).catch(function () {});   // intentionally ignore errors — best-effort only
+    } catch (_) { /* never let pre-warm affect the UI */ }
+  }
+
+  // ─── Live TTS — sentence queue ────────────────────────────────────────────
+  // Fired during Gemini streaming: each time a sentence boundary is detected
+  // in the accumulating response, the completed sentence is enqueued for backend
+  // TTS synthesis immediately — user hears audio ~1s after the first sentence
+  // streams in, instead of waiting for [DONE] (~3-5s).
+  let liveTtsSentBuf  = '';  // accumulates streamed tokens looking for sentence ends
+  let liveTtsQueue    = [];  // sentences waiting to be synthesised
+  let liveTtsPlaying  = false;
+  let liveTtsGen      = 0;   // stamp to cancel stale queues on new message
+
+  const TE_SENT_END = /[।॥!?.]+\s/;  // Telugu/English sentence boundary
+
+  // Live TTS uses browser Web Speech Synthesis directly — zero HTTP round-trip,
+  // starts within ~100ms of the first sentence completing. Sarvam quality TTS
+  // is still available when the user taps the speaker button on the full response.
+  async function drainLiveTts(myGen, lang) {
+    if (liveTtsPlaying || liveTtsGen !== myGen) return;
+    if (!window.speechSynthesis) return;  // browser doesn't support speech
+    liveTtsPlaying = true;
+
+    while (liveTtsQueue.length > 0 && liveTtsGen === myGen) {
+      const sentence = liveTtsQueue.shift();
+      if (!sentence || !sentence.trim()) continue;
+
+      await new Promise((resolve) => {
+        const utterance = new SpeechSynthesisUtterance(sentence);
+        utterance.lang  = lang === 'te' ? 'te-IN' : 'en-IN';
+        utterance.rate  = 1.05;  // natural news-anchor pace
+        // Prefer a cached Telugu/English voice if available
+        const preferred = cachedVoices.find(v => v.lang === utterance.lang)
+                       || cachedVoices.find(v => v.lang.startsWith(lang === 'te' ? 'te' : 'en'));
+        if (preferred) utterance.voice = preferred;
+        utterance.onend   = resolve;
+        utterance.onerror = resolve;
+        // Abort if: gen changed (new message), voice mode exited, or isSpeaking from explicit tap
+        if (liveTtsGen !== myGen || isSpeaking) { resolve(); return; }
+        window.speechSynthesis.speak(utterance);
+      });
+
+      // Small gap between sentences for natural pacing
+      if (liveTtsQueue.length > 0 && liveTtsGen === myGen) {
+        await new Promise(r => setTimeout(r, 80));
+      }
+    }
+    liveTtsPlaying = false;
+  }
+
+  function feedLiveTts(token, myGen, lang) {
+    if (liveTtsGen !== myGen) return;
+    liveTtsSentBuf += token;
+    // Detect sentence boundary: sentence end punctuation followed by space
+    const match = liveTtsSentBuf.match(TE_SENT_END);
+    if (match) {
+      const idx      = liveTtsSentBuf.indexOf(match[0]) + match[0].length;
+      const sentence = liveTtsSentBuf.slice(0, idx).trim();
+      liveTtsSentBuf = liveTtsSentBuf.slice(idx);
+      const spoken = prepareForTTS(sentence);   // strip markup, gallery lines, echoes
+      if (spoken && spoken.trim().length > 20) {   // skip gallery/empty/short fragments
+        liveTtsQueue.push(spoken.trim());
+        drainLiveTts(myGen, lang);
+      }
+    }
+  }
+
   // ─── Submit message ────────────────────────────────────────────────────────
   async function submitMessage(el, config) {
     const text = el.input.value.trim();
     if (!text || isTyping) return;
 
-    // Response language is controlled by the toggle (currentLang), not the input script.
+    // Auto-detect script: if user typed in Telugu but lang pill is English (or vice
+    // versa), switch lang for this query only — does not change the toggle state.
+    const queryLang = detectQueryLang(text);
+    if (queryLang !== currentLang) {
+      console.log(`[NewsAI] Auto-lang: Telugu detected in English-pill query — switching to te for this query`);
+    }
+
     // Hide chips after first real message
     if (chipsVisible) {
       const chips = document.getElementById('newsai-chips');
@@ -680,9 +1063,9 @@
     const _topicForRedirect = detectAndFilterTopic(text, null);
     if (window.NewsAI) window.NewsAI._lastSection = _topicForRedirect ? _topicForRedirect.section : null;
 
-    // ── Non-skippable ad every 3rd prompt ────────────────────────────────────
+    // ── Non-skippable ad every 3rd prompt (skipped in hands-free voice mode) ──
     promptCount++;
-    if (promptCount % 3 === 0) {
+    if (promptCount % 3 === 0 && !voiceMode) {
       await showAdOverlay(config);
     }
 
@@ -694,11 +1077,26 @@
     isTyping = true;
     showTyping(el.messages);
 
+    // Override config lang for this query if auto-detect fired
+    const savedLang = currentLang;
+    if (queryLang !== currentLang) currentLang = queryLang;
+
     try {
       // ── Streaming: create bot bubble upfront, fill as tokens arrive ─────────
       let streamedEl   = null;
       let streamedBubble = null;
       let fullReply    = '';
+
+      lastArticleMeta = [];  // reset per-message; repopulated by the SSE 'meta' event
+
+      // Set up live TTS state for this message
+      liveTtsSentBuf = '';
+      liveTtsQueue   = [];
+      liveTtsPlaying = false;
+      const myLiveTtsGen = ++liveTtsGen;
+      // Live TTS only fires when the user has voice input active (voiceMode or voiceInputActive)
+      // so it doesn't surprise users who just want to read the response.
+      const doLiveTts = voiceMode || voiceInputActive;
 
       config._onStream = (token) => {
         if (!streamedEl) {
@@ -708,12 +1106,26 @@
         }
         fullReply += token;
         if (streamedBubble) {
-          streamedBubble.textContent = fullReply;
+          // Strip content markers from live display (mirrors renderBotText on final render)
+          const _normEcho = s => s.replace(/[\u200B-\u200F\u00AD\uFEFF\u2028\u2029]/g, '').replace(/[.!?\u2026]+$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const displayText = fullReply
+            .replace(/ ?[—–] ?\(same as headline[^)]*\)/gi, '')
+            .replace(/\(same as headline[^)]*\)/gi, '')
+            .replace(/ ?[—–] ?\(not available\)/gi, '')
+            .replace(/\(not available\)/gi, '')
+            // Strip Gemini headline echo: **X** — X during streaming too
+            .replace(/\*\*([^*\n]+)\*\*\s*[—–]\s*([^\n*]{5,})/g, (m, h, d) =>
+              _normEcho(d) === _normEcho(h) ? `**${h}**` : m);
+          streamedBubble.textContent = displayText;
           scrollToBottom(el.messages);
         }
+        // Feed sentence detector for live TTS (voice mode only)
+        if (doLiveTts && !isSpeaking) feedLiveTts(token, myLiveTtsGen, queryLang);
       };
 
       const reply = await callClaude(config);
+      // Restore lang in case auto-detect overrode it
+      currentLang = savedLang;
       delete config._onStream;
 
       // Snap and consume _lastArticles before any async gaps
@@ -732,7 +1144,10 @@
         hideTyping();
         streamedEl = appendMessage(el.messages, 'bot', reply || '(empty response)');
         // Don't inject article links when AI explicitly says info isn't in today's paper
-        if (!isNoInfoReply(reply)) injectArticleLinks(streamedEl, lastArticles);
+        if (!isNoInfoReply(reply)) {
+          injectArticleLinks(streamedEl, lastArticles);
+          renderImageStrip(streamedEl, lastArticleMeta);
+        }
       } else {
         const finalText = reply || fullReply;
         // Upgrade from textContent (safe during streaming) to rendered HTML with clickable links
@@ -752,25 +1167,39 @@
           newShareBtn.dataset.text = finalText;
           oldShareBtn.parentNode.replaceChild(newShareBtn, oldShareBtn);
         }
+        // Update copy button data-text to final streamed content (mirrors speak/share update above)
+        const oldCopyBtn = streamedEl.querySelector('.newsai-copy-btn');
+        if (oldCopyBtn) oldCopyBtn.dataset.text = finalText;
         wireSpeak(streamedEl);
         wireShare(streamedEl);
         wireCopy(streamedEl);
         // Don't inject article links when AI explicitly says info isn't in today's paper
-        if (!isNoInfoReply(finalText)) injectArticleLinks(streamedEl, lastArticles);
-        scrollToBottom(el.messages);
+        if (!isNoInfoReply(finalText)) {
+          injectArticleLinks(streamedEl, lastArticles);
+          renderImageStrip(streamedEl, lastArticleMeta);
+        }
+        // Scroll to the TOP of the new bot message so user reads from the start
+        requestAnimationFrame(() => {
+          if (streamedEl) streamedEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
+          else scrollToBottom(el.messages);
+        });
       }
 
       const finalReply = reply || fullReply;
       conversationHistory.push({ role: 'assistant', content: finalReply });
       trimHistory();
       saveSession();
+      // saveHistory removed — history intentionally clears when tab closes
 
       if (voiceInputActive) {
         voiceInputActive = false;
         const speakBtn = streamedEl.querySelector('.newsai-speak-btn');
         // Guard: never call startSpeaking with empty text — an empty TTS request returns
         // HTTP 400, which (if not caught as transient) permanently disables backend TTS.
-        if (speakBtn && finalReply && finalReply.trim()) startSpeaking(speakBtn, finalReply);
+        if (speakBtn && finalReply && finalReply.trim()) {
+          if (voiceMode) setVoiceStatus('speaking');
+          startSpeaking(speakBtn, finalReply);
+        }
       }
 
       // ── Section redirect button ───────────────────────────────────────────────
@@ -804,25 +1233,34 @@
             'border:none', 'cursor:pointer', 'font-size:12px', 'font-weight:600',
             'text-align:center',
           ].join(';');
+          const brandName = (config && config.brand && config.brand.name) || 'NewsAI';
           sectionBtn.textContent = currentLang === 'te'
-            ? `📰 సాక్షి ${teKey} చదవండి →`
-            : `📰 Read all ${_lastSection} news →`;
+            ? `📰 ${brandName} ${teKey} చదవండి →`
+            : `📰 Read all ${_lastSection} news on ${brandName} →`;
           sectionBtn.addEventListener('click', function() {
             window.location.href = sectionUrl;
           });
           streamedEl.appendChild(sectionBtn);
         }
       }
+
+      // ── Stream-drop recovery: SSE ended without [DONE] → offer a Retry ────────
+      if (!_lastStreamComplete && streamedEl) {
+        appendRetryIndicator(streamedEl, el, config);
+      }
     } catch (err) {
       delete config._onStream;
+      currentLang = savedLang;   // restore in case auto-detect overrode it
+      liveTtsGen++;               // cancel any pending live TTS queue
       voiceInputActive = false;
       hideTyping();
       const errText = err?.message || String(err);
       console.error('[NewsAI] API error:', errText, err);
       appendMessage(el.messages, 'bot', t('error'));
     } finally {
-      isTyping      = false;
+      isTyping         = false;
       el.send.disabled = false;
+      currentLang      = savedLang;   // always restore (no-op if not overridden)
     }
   }
 
@@ -858,31 +1296,116 @@
     return { url, headers: { 'Content-Type': 'application/json' } };
   }
 
+  // ─── Smart topN classifier ────────────────────────────────────────────────
+  // Returns the right article budget for a question so we don't send 30 articles
+  // for a simple "who scored?" query or 3 articles for a full section digest.
+  function classifyTopN(question, cacheActive) {
+    // When Gemini context cache is active, all 200 articles are already cached —
+    // we only need a handful of articles for the "Read More" link buttons.
+    if (cacheActive) return 4;
+
+    const q = question.toLowerCase();
+
+    // Simple factual: short who/what/when/how-many queries
+    const isSimple = q.length < 70 && /^(who|what|when|where|how many|ఎవరు|ఏమి|ఎంత|ఎప్పుడు|స్కోర్|కెప్టెన్)/.test(q);
+    if (isSimple) return 4;
+
+    // Section digest / "today's X" / "all cricket" / broad summary
+    const isBroadDigest = /(summary|summarize|digest|highlights|all articles|all news|today's|ఈ రోజు|అన్ని వార్తలు|హెడ్లైన్స్|సారాంశం|టాప్ వార్తలు)/.test(q);
+    if (isBroadDigest) return 12;
+
+    // Section-specific query that needs a few results to scan
+    return 6;
+  }
+
   // ─── Backend context fetch ────────────────────────────────────────────────
   async function fetchBackendContext(question) {
     try {
+      const cacheActive = !!(geminiCacheId && Date.now() < geminiCacheExpiry);
+      const topN = classifyTopN(question, cacheActive);
+
       const resp = await fetch(`${backendBaseUrl}/api/query`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ question, topN: 30 }),  // 30 so full section lists fit
+        body:    JSON.stringify({ question, topN, sessionId }),
         signal:  AbortSignal.timeout(3000),
       });
       if (!resp.ok) return null;
       const data = await resp.json();
       if (!data.context) return null;
-      console.log(`[NewsAI] ✅ Backend RAG: ${data.articles?.length} articles matched`);
+      console.log(`[NewsAI] ✅ Backend RAG: ${data.articles?.length} articles | topN=${topN} | cache=${cacheActive}`);
       // Store top matched articles for redirect buttons (up to 3, URL required)
       if (data.articles && data.articles.length > 0 && window.NewsAI) {
         const _seenUrls = new Set();
         window.NewsAI._lastArticles = data.articles
           .filter(function(a) { return !!a.url && !_seenUrls.has(a.url) && _seenUrls.add(a.url); })
           .slice(0, 3)
-          .map(function(a) { return { url: a.url, title: a.title || '' }; });
+          .map(function(a) { return { url: a.url, title: a.title || '', imageUrl: a.imageUrl || '' }; });
+        // Also feed the image strip (top 5 with images) for the direct-fallback path,
+        // where the backend SSE 'meta' event never fires.
+        lastArticleMeta = data.articles
+          .slice(0, 5)
+          .map(function(a) { return { url: a.url || '', title: a.title || '', imageUrl: a.imageUrl || '' }; });
       }
-      return data.context;
+      // When cache is active, don't pass the context into systemPrompt — the cache
+      // already has all articles. Return null so callGemini uses its slim overlay only.
+      return cacheActive ? null : data.context;
     } catch (_) {
       return null;
     }
+  }
+
+  // ─── Backend AI proxy (key stays server-side) ────────────────────────────
+  // POSTs the chat history to /api/ai and consumes the SSE stream. Each event is
+  // `data: {"token":"..."}`; the terminal event is `data: [DONE]`. Returns the
+  // full concatenated text. Throws on HTTP error so callClaude() can fall back
+  // to a direct browser-side provider call.
+  async function callBackendAI(messages, lang, sessId, onStream, opts = {}) {
+    // 35-second timeout prevents the widget hanging indefinitely on a stalled connection.
+    const resp = await fetch(`${backendBaseUrl}/api/ai`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ messages, lang, sessionId: sessId, voiceMode: !!opts.voiceMode }),
+      signal:  AbortSignal.timeout(35000),
+    });
+    if (!resp.ok) throw new Error(`Backend AI HTTP ${resp.status}`);
+    if (!resp.body || !resp.body.getReader) throw new Error('Backend AI stream unsupported');
+
+    const reader = resp.body.getReader();
+    const dec    = new TextDecoder();
+    let buf  = '';
+    let full = '';
+    // Track clean completion: only a [DONE] token flips this true. If the stream drops
+    // (network/timeout) the loop exits via `done` with this still false → caller shows Retry.
+    let streamDone = false;
+    _lastStreamComplete = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw) continue;
+        if (raw === '[DONE]') { streamDone = true; break; }
+        try {
+          const obj = JSON.parse(raw);
+          if (obj.token) { full += obj.token; if (onStream) onStream(obj.token); }
+          // Handle meta event — populate Read More article links + image strip
+          if (obj.meta && Array.isArray(obj.meta.articles)) {
+            lastArticleMeta = obj.meta.articles
+              .filter(function(a) { return a && (a.url || a.imageUrl); })
+              .map(function(a) { return { url: a.url || '', title: a.title || '', imageUrl: a.imageUrl || '' }; });
+            if (window.NewsAI) window.NewsAI._lastArticles = obj.meta.articles;
+          }
+        } catch (_) { /* partial JSON across chunks — ignore */ }
+      }
+      if (streamDone) break;
+    }
+    _lastStreamComplete = streamDone;
+    return full;
   }
 
   // ─── LLM API call (auto-routes by key prefix) ────────────────────────────
@@ -934,15 +1457,37 @@
       console.log(`[NewsAI] ${ready ? '✅ Section pages ready — proceeding with query' : '⚠️ Timed out — proceeding anyway'}`);
     }
 
-    // Try backend briefing first (has full body text — zero hallucination)
+    const histLimit = (provider === 'groq') ? 2 : MAX_HISTORY;
+    const messages  = conversationHistory.slice(-histLimit * 2);
+    const onStream  = config._onStream || null;
+
+    // ── Try backend AI proxy first (API key stays server-side) ────────────────
+    // The backend fetches its own article context and calls Gemini — we don't need
+    // to call fetchBackendContext or buildSystemPrompt unless this falls back.
+    try {
+      const backendResult = await callBackendAI(messages, currentLang, sessionId, onStream,
+        { voiceMode: voiceMode || voiceInputActive });
+      // Use != null (covers both null and undefined) so an empty string "" is treated as a
+      // valid (if empty) response — not as a failure that triggers a redundant direct API call.
+      if (backendResult != null) return backendResult;
+    } catch (backendErr) {
+      console.warn('[NewsAI] Backend AI unavailable, falling back to direct API:', backendErr.message);
+      // In extension context (or on sites with strict CSP like Sakshi.com), direct fetch
+      // to external APIs is blocked — TypeError "Failed to fetch". Skip the fallback
+      // and re-throw so the user sees a clear error message instead of a confusing silent failure.
+      const _isExtCtx = typeof chrome !== 'undefined' && typeof chrome.runtime !== 'undefined' && !!chrome.runtime.id;
+      if (_isExtCtx) throw backendErr;
+    }
+
+    // ── Fallback: direct browser-side provider call ───────────────────────────
+    // Only reached when the backend proxy is unreachable or returned a non-OK status.
+    // The backend SSE may have already flipped this false mid-drop; the direct call is a
+    // full replacement, so treat it as a clean path and clear the "stream broke" flag.
+    _lastStreamComplete = true;
     const backendCtx = await fetchBackendContext(lastUserMsg);
     if (backendCtx && window.NewsAI) window.NewsAI._backendContext = backendCtx;
-
     const systemPrompt = buildSystemPrompt(config, provider, lastUserMsg);
-    const histLimit = (provider === 'groq') ? 2 : MAX_HISTORY;
-    const messages = conversationHistory.slice(-histLimit * 2);
 
-    const onStream = config._onStream || null;
     if (provider === 'gemini')    return callGemini(apiKey, systemPrompt, messages, onStream);
     if (provider === 'anthropic') return callAnthropic(apiKey, systemPrompt, messages, onStream);
     return callGroq(apiKey, systemPrompt, messages, config.llmModel, onStream);
@@ -1130,6 +1675,23 @@
 
     const MODEL = 'gemini-2.5-flash-lite';
 
+    // ── Lazy cache refresh ────────────────────────────────────────────────────
+    // At widget open we fetch the cache ID once — but articles may be ingested
+    // after that (backend just started, midnight reset, etc.). If we have no cache
+    // ID, do a quick 1-second probe now so we benefit from the cache this call.
+    if (!geminiCacheId || Date.now() >= geminiCacheExpiry) {
+      try {
+        const cr = await fetch(`${backendBaseUrl}/api/gemini-cache`,
+          { signal: AbortSignal.timeout(1000) });
+        const cd = cr.ok ? await cr.json() : null;
+        if (cd && cd.active && cd.cacheId) {
+          geminiCacheId     = cd.cacheId;
+          geminiCacheExpiry = cd.expiresAt || (Date.now() + 23 * 3600 * 1000);
+          console.log('[NewsAI] Gemini cache refreshed on-demand:', geminiCacheId);
+        }
+      } catch (_) { /* cache unavailable — fall through to full prompt */ }
+    }
+
     // Use Gemini context cache when available — avoids resending all articles every request
     // (90% cheaper on cached input tokens). Falls back to full systemInstruction if cache
     // is missing, expired, or the backend doesn't support caching (too few articles).
@@ -1152,19 +1714,31 @@ This overrides every previous message in this conversation. Ignore the language 
 
 STRICT RULES: Use **bold** only for headlines. Never invent scores, statistics, player names, or numbers. Never include URLs in your response. Never include CMS datelines, timestamps, or "Updated on" text.`;
 
+    // thinkingBudget:0 — Gemini 2.5 models default to outputting "thought:true" tokens
+    // first, then the actual response. Our SSE parser takes parts[0].text; without
+    // disabling thinking, parts[0] is a thought token and the real response is missed.
+    const _genConfig = { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85,
+                         thinkingConfig: { thinkingBudget: 0 } };
+
     const bodyObj = activeCacheId
       ? {
           // cachedContent holds today's articles (pre-cached by backend).
-          // systemInstruction sends per-query language/anti-hallucination rules alongside it.
+          // ⚠️ Gemini API FORBIDS using systemInstruction alongside cachedContent —
+          // error: "CachedContent can not be used with system_instruction".
+          // Inject the per-query overlay as a leading user/model exchange in contents[]
+          // so it takes effect without conflicting with the cache constraint.
           cachedContent: activeCacheId,
-          systemInstruction: { parts: [{ text: cacheOverlayInstruction }] },
-          contents: deduped,
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85 },
+          contents: [
+            { role: 'user',  parts: [{ text: cacheOverlayInstruction }] },
+            { role: 'model', parts: [{ text: 'Understood. I will follow these instructions exactly.' }] },
+            ...deduped,
+          ],
+          generationConfig: _genConfig,
         }
       : {
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: deduped,
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.1, topP: 0.85 },
+          generationConfig: _genConfig,
         };
 
     if (activeCacheId) {
@@ -1203,8 +1777,11 @@ STRICT RULES: Use **bold** only for headlines. Never invent scores, statistics, 
             if (raw && raw !== '[DONE]') {
               try {
                 const chunk = JSON.parse(raw);
-                const token = chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                if (token) { full += token; onStream(token); }
+                const _part = chunk.candidates?.[0]?.content?.parts?.[0];
+                if (!_part || _part.thought) { /* skip thinking tokens */ } else {
+                  const token = _part.text || '';
+                  if (token) { full += token; onStream(token); }
+                }
               } catch (_) {}
             }
           }
@@ -1219,7 +1796,9 @@ STRICT RULES: Use **bold** only for headlines. Never invent scores, statistics, 
           if (raw === '[DONE]') continue;
           try {
             const chunk = JSON.parse(raw);
-            const token = chunk.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const _part = chunk.candidates?.[0]?.content?.parts?.[0];
+            if (!_part || _part.thought) continue;  // skip thinking tokens
+            const token = _part.text || '';
             if (token) { full += token; onStream(token); }
           } catch (_) {}
         }
@@ -1407,21 +1986,19 @@ STRICT RULES: Use **bold** only for headlines. Never invent scores, statistics, 
     }
     let out = `${section} articles in today's edition:\n\n`;
     matching.forEach(a => {
-      out += `Headline: ${a.headline}\n`;
       const rawBody = stripTimestamps((a.bodyTe || a.body || '').trim());
       const body = dedupContent(rawBody);  // collapse repeated fragments from CMS bugs
-      if (body.length >= 150 && body !== a.headline) {
-        // Pre-extract first sentence in JS — LLM copies Summary field, never generates it.
-        const summary = extractFirstSentence(body);
-        const normStr = s => s.replace(/[.?!।\s]+$/g, '').replace(/^\s+/, '').toLowerCase();
-        if (summary && normStr(summary) !== normStr(a.headline)) {
-          out += `Summary: ${summary}\n`;
-        }
-        out += `Body: ${body.slice(0, 450)}\n`;
-      } else {
-        // Too short — LLM shows headline only
-        out += `Body: [HEADLINE ONLY — DO NOT ADD ANY DESCRIPTION]\n`;
+      // Skip articles with no real body — they add no grounding value and a
+      // headline-only entry only tempts the model to invent a description.
+      if (body.length < 150 || body === a.headline) return;  // skip — no body
+      out += `Headline: ${a.headline}\n`;
+      // Pre-extract first sentence in JS — LLM copies Summary field, never generates it.
+      const summary = extractFirstSentence(body);
+      const normStr = s => s.replace(/[.?!।\s]+$/g, '').replace(/^\s+/, '').toLowerCase();
+      if (summary && normStr(summary) !== normStr(a.headline)) {
+        out += `Summary: ${summary}\n`;
       }
+      out += `Body: ${body.slice(0, 450)}\n`;
       // URL intentionally excluded — LLM must never print URLs in responses.
       out += '\n';
     });
@@ -1652,6 +2229,18 @@ ${topicConstraint}`;
     });
     el.input.placeholder = t('placeholder');
     if (recognition) recognition.lang = lang === 'te' ? 'te-IN' : 'en-IN';
+
+    // Rebuild the welcome card in the new language (welcome text, digest, sample
+    // cards, section chips) — but only while the welcome is what's on screen
+    // (no conversation started yet). Otherwise just refresh the (hidden) chips,
+    // which _injectSectionChips no-ops on when hidden.
+    if (conversationHistory.length === 0 && chipsVisible && el.messages) {
+      el.messages.innerHTML = '';
+      renderWelcome(el, config);
+    } else {
+      _injectSectionChips(todaySections);
+    }
+
     track('lang_switch', { lang });
   }
 
@@ -1688,18 +2277,198 @@ ${topicConstraint}`;
     };
 
     el.mic.addEventListener('click', () => {
-      if (isListening) {
-        recognition.stop();
-        stopListening(el);
-      } else {
-        startListening(el);
-      }
+      // Podcast-style voice mode: a single tap toggles a hands-free conversation.
+      if (voiceMode) { exitVoiceMode(); return; }
+      // If a legacy push-to-talk session is somehow running, stop it first.
+      if (isListening) { recognition.stop(); stopListening(el); return; }
+      enterVoiceMode();
     });
   }
 
+  // ─── Podcast-style continuous voice mode ──────────────────────────────────
+  // Enters a full-panel "listening" overlay (like ChatGPT / Gemini voice):
+  //   listen (continuous) → 1.5s silence auto-submits → AI answers with TTS →
+  //   TTS ends → mic restarts. Tap ✕ or say "stop"/"ఆపు" to exit.
+  function enterVoiceMode() {
+    if (voiceMode) return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition || !widgetEl) return;   // no speech support — silently ignore
+    voiceMode = true;
+    voiceProcessing = false;
+
+    voiceModeEl = document.createElement('div');
+    voiceModeEl.className = 'newsai-voice-overlay';
+    voiceModeEl.innerHTML = `
+      <div class="newsai-voice-inner">
+        <div class="newsai-voice-bars">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div class="newsai-voice-text">
+          <div class="newsai-voice-status" id="newsai-voice-status">Listening…</div>
+          <div class="newsai-voice-transcript" id="newsai-voice-transcript"></div>
+        </div>
+        <button class="newsai-voice-exit" id="newsai-voice-exit" aria-label="Exit voice mode">✕</button>
+      </div>
+    `;
+    // Append to the widget panel (scoped), falling back to body if not found.
+    const panel = document.getElementById('newsai-panel');
+    (panel || document.body).appendChild(voiceModeEl);
+    const exitBtn = document.getElementById('newsai-voice-exit');
+    if (exitBtn) exitBtn.onclick = exitVoiceMode;
+
+    setVoiceStatus('listening');
+    startVoiceListening();
+  }
+
+  function exitVoiceMode() {
+    voiceMode = false;
+    voiceProcessing = false;
+    clearTimeout(voiceSilenceTimer);
+    if (recognition) { try { recognition.stop(); } catch (_) {} }
+    // Stop AI speech if playing — covers all TTS types (PCM, SSE, Web Speech)
+    stopSpeaking();
+    if (voiceModeEl) { try { voiceModeEl.remove(); } catch (_) {} voiceModeEl = null; }
+    // Explicit reset point: drop the persisted session history when the user leaves voice mode.
+    clearHistory();
+  }
+
+  // status: 'listening' | 'thinking' | 'speaking' | null
+  function setVoiceStatus(status) {
+    const statusEl = document.getElementById('newsai-voice-status');
+    const labels = currentLang === 'te'
+      ? { listening: 'వింటున్నాను…', thinking: 'ఆలోచిస్తున్నాను…', speaking: 'చెబుతున్నాను…' }
+      : { listening: 'Listening…',   thinking: 'Thinking…',       speaking: 'Speaking…' };
+    if (statusEl) statusEl.textContent = labels[status] || '';
+    if (voiceModeEl) voiceModeEl.dataset.state = status || '';
+  }
+
+  function startVoiceListening() {
+    if (!voiceMode) return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) { exitVoiceMode(); return; }
+
+    // Capture in a local const so all handlers close over THIS specific instance (rec).
+    // If the module-level `recognition` variable is used inside handlers, a second call to
+    // startVoiceListening() re-assigns `recognition` to a new object — the OLD onend handler
+    // then calls recognition.start() on the NEW (already-running) instance → InvalidStateError.
+    const rec = new SpeechRecognition();
+    recognition = rec;   // keep module-level ref in sync for exitVoiceMode / stopListening
+    rec.lang = currentLang === 'te' ? 'te-IN' : 'en-IN';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    let finalTranscript = '';
+
+    rec.onstart = () => { if (voiceMode && !voiceProcessing) setVoiceStatus('listening'); };
+
+    rec.onresult = (e) => {
+      // Barge-in: if the AI is somehow still speaking, stop it and listen.
+      if (isSpeaking) {
+        stopSpeaking();   // covers all TTS types (backend-pcm, backend, Web Speech)
+        setVoiceStatus('listening');
+      }
+
+      let interim = '';
+      let hasFinal = false;
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const tr = e.results[i][0].transcript;
+        if (e.results[i].isFinal) { finalTranscript += tr + ' '; hasFinal = true; }
+        else interim += tr;
+      }
+      const display = (finalTranscript + interim).trim();
+      const transcriptEl = document.getElementById('newsai-voice-transcript');
+      if (transcriptEl) transcriptEl.textContent = display;
+      if (widgetEl && widgetEl.input) widgetEl.input.value = display; // mirror into input box
+
+      // Reset silence timer ONLY on final results.
+      // Interim-only events (ambient noise misrecognised as speech) must NOT reset the
+      // timer — otherwise background noise prevents auto-submit in noisy environments.
+      if (hasFinal) {
+        clearTimeout(voiceSilenceTimer);
+        if (finalTranscript.trim()) {
+          voiceSilenceTimer = setTimeout(() => {
+            if (!voiceMode) return;
+            const q = finalTranscript.trim();
+            finalTranscript = '';
+            if (transcriptEl) transcriptEl.textContent = '';
+            // Spoken "stop" / "ఆపు" exits voice mode.
+            if (/^(stop|exit|quit|ఆపు|ఆపండి|నిలిపివేయి)\.?$/i.test(q)) { exitVoiceMode(); return; }
+            if (q) submitVoiceQuery(q);
+          }, VOICE_SILENCE_MS);
+        }
+      }
+    };
+
+    rec.onend = () => {
+      // Auto-restart unless we intentionally stopped (processing) or AI is speaking.
+      // Uses `rec` (local), NOT `recognition` (module-level) — avoids the race where
+      // a newer startVoiceListening() call has already replaced `recognition` with a
+      // new instance and this stale handler would re-start the wrong object.
+      if (voiceMode && !isSpeaking && !voiceProcessing) {
+        setTimeout(() => {
+          if (voiceMode && !isSpeaking && !voiceProcessing) { try { rec.start(); } catch (_) {} }
+        }, 300);
+      }
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === 'no-speech' && voiceMode && !voiceProcessing) {
+        try { rec.start(); } catch (_) {}
+      } else if (e.error !== 'aborted') {
+        console.warn('[NewsAI Voice] Recognition error:', e.error);
+      }
+    };
+
+    try { rec.start(); } catch (_) {}
+  }
+
+  async function submitVoiceQuery(query) {
+    if (!voiceMode || !widgetEl || !widgetConfig) return;
+    voiceProcessing = true;
+    setVoiceStatus('thinking');
+    // Stop the mic while the AI thinks + speaks (so it never transcribes its own voice).
+    try { recognition.stop(); } catch (_) {}
+    clearTimeout(voiceSilenceTimer);
+
+    // Reuse the SAME pipeline the text input uses. voiceInputActive makes
+    // submitMessage auto-speak the reply; the resetBtn hook in startSpeaking then
+    // restarts listening once TTS finishes.
+    widgetEl.input.value = query;
+    widgetEl.send.disabled = false;
+    voiceInputActive = true;
+    try {
+      await submitMessage(widgetEl, widgetConfig);
+    } catch (err) {
+      console.warn('[NewsAI Voice] Query error:', err && err.message);
+    }
+
+    // Fallback: if no TTS ever started (empty reply / speech unavailable / error),
+    // resetBtn won't fire — resume listening here. Guarded by voiceProcessing so it
+    // never double-starts once resetBtn has already restarted the mic.
+    setTimeout(() => {
+      if (voiceMode && voiceProcessing && !isSpeaking) {
+        voiceProcessing = false;
+        setVoiceStatus('listening');
+        startVoiceListening();
+      }
+    }, 800);
+  }
+
+  // Singleton AudioContext for beeps — avoids creating a new context on every mic
+  // start/stop, which would hit Chrome's ~6-context limit after ~3 voice turns.
+  let _beepCtx = null;
+  function _getBeepCtx() {
+    if (!_beepCtx || _beepCtx.state === 'closed') {
+      try { _beepCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {}
+    }
+    return _beepCtx;
+  }
   function playBeep(freq = 660, duration = 120) {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = _getBeepCtx();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain); gain.connect(ctx.destination);
@@ -1778,8 +2547,22 @@ ${topicConstraint}`;
     const btn = msgEl.querySelector('.newsai-copy-btn');
     if (!btn) return;
     btn.addEventListener('click', () => {
-      const bubble = msgEl.querySelector('.newsai-bubble');
-      const text = bubble ? bubble.textContent.trim() : '';
+      // Prefer raw markdown stored in data-text — strip ** markers but keep \n separators
+      // so each article line pastes on its own line. bubble.textContent is layout-unaware
+      // and collapses block-element newlines, producing joined text on paste.
+      const rawMd = btn.dataset.text;
+      let text;
+      if (rawMd) {
+        text = rawMd
+          .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+          .replace(/\[HEADLINE ONLY[^\]]*\]/gi, '')
+          .replace(/ ?[—–] ?\(same as headline[^)]*\)/gi, '')
+          .replace(/ ?[—–] ?\(not available\)/gi, '')
+          .replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      } else {
+        const bubble = msgEl.querySelector('.newsai-bubble');
+        text = bubble ? (bubble.innerText || bubble.textContent || '').trim() : '';
+      }
       if (!text) return;
 
       const markCopied = () => {
@@ -1860,20 +2643,82 @@ ${topicConstraint}`;
       link.addEventListener('click', () => track('article_click', { url: link.href }));
     });
 
-    // Inject article thumbnails if any have imageUrl
-    const withImages = articles.filter(a => a.imageUrl && /^https?:\/\//i.test(a.imageUrl)).slice(0, 3);
-    if (withImages.length > 0) {
-      const thumbStrip = document.createElement('div');
-      thumbStrip.className = 'newsai-thumb-strip';
-      thumbStrip.innerHTML = withImages.map(a =>
-        '<img class="newsai-thumb" src="' + escAttr(a.imageUrl) +
-        '" alt="' + escAttr(truncateTitle(a.title, 40)) +
-        '" loading="lazy" onerror="this.parentElement.removeChild(this)" />'
-      ).join('');
-      container.appendChild(thumbStrip);
-    }
-
+    // Thumbnails are now handled by renderImageStrip() (driven by lastArticleMeta),
+    // appended separately below the bubble — so we don't duplicate images here.
     msgEl.appendChild(container);
+  }
+
+  // ─── Image strip (Task 4) ─────────────────────────────────────────────────
+  // Horizontal strip of small image cards (thumbnail + truncated title) appended
+  // below a bot bubble. Driven by lastArticleMeta populated from the SSE 'meta'
+  // event (or fetchBackendContext in the direct-API fallback path).
+  function renderImageStrip(msgEl, meta) {
+    if (!msgEl || !Array.isArray(meta)) return;
+    // Skip articles with empty/falsy imageUrl
+    const withImages = meta
+      .filter(a => a && a.imageUrl && /^https?:\/\//i.test(a.imageUrl))
+      .slice(0, 5);
+    if (withImages.length === 0) return;                     // only show if ≥1 image
+    if (msgEl.querySelector('.newsai-image-strip')) return;  // never inject twice
+
+    const strip = document.createElement('div');
+    strip.className = 'newsai-image-strip';
+    strip.innerHTML = withImages.map(a => {
+      const href  = /^https?:\/\//i.test(a.url || '') ? escAttr(a.url) : '#';
+      const title = a.title
+        ? '<div class="newsai-img-card-title">' + escHtml(truncateTitle(a.title, 60)) + '</div>'
+        : '';
+      return '<a href="' + href + '" target="_blank" rel="noopener" class="newsai-img-card">' +
+               '<img src="' + escAttr(a.imageUrl) + '" alt="" loading="lazy" ' +
+               'onerror="this.closest(\'.newsai-img-card\').remove()">' +
+               title +
+             '</a>';
+    }).join('');
+    strip.querySelectorAll('.newsai-img-card').forEach(card => {
+      card.addEventListener('click', () => track('article_click', { url: card.href }));
+    });
+    msgEl.appendChild(strip);
+  }
+
+  // ─── Stream-drop retry indicator (Task 2) ─────────────────────────────────
+  // Appended to a bot bubble when the SSE stream ended without [DONE]. Offers a
+  // one-click retry that re-sends the last user message.
+  function appendRetryIndicator(streamedEl, el, config) {
+    if (!streamedEl || streamedEl.querySelector('.newsai-retry-wrap')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'newsai-retry-wrap';
+    const warn = document.createElement('span');
+    warn.className = 'newsai-retry-warn';
+    warn.textContent = currentLang === 'te' ? '⚠ కనెక్షన్ కోల్పోయింది. ' : '⚠ Connection lost. ';
+    const btn = document.createElement('button');
+    btn.className = 'newsai-retry-btn';
+    btn.type = 'button';
+    btn.textContent = currentLang === 'te' ? '↺ మళ్ళీ' : '↺ Retry';
+    btn.addEventListener('click', () => {
+      wrap.remove();
+      // Keep history consistent: drop the half-streamed assistant entry, then re-send the
+      // last user message (popping it too so submitMessage re-adds it exactly once).
+      if (conversationHistory.length && conversationHistory[conversationHistory.length - 1].role === 'assistant') {
+        conversationHistory.pop();
+      }
+      let lastUserText = '';
+      if (conversationHistory.length && conversationHistory[conversationHistory.length - 1].role === 'user') {
+        lastUserText = conversationHistory[conversationHistory.length - 1].content;
+        conversationHistory.pop();
+      } else {
+        const lu = conversationHistory.filter(m => m.role === 'user').slice(-1)[0];
+        lastUserText = lu ? lu.content : '';
+      }
+      saveSession();
+      if (!lastUserText) return;
+      el.input.value = lastUserText;
+      el.send.disabled = false;
+      submitMessage(el, config);
+    });
+    wrap.appendChild(warn);
+    wrap.appendChild(btn);
+    const bubble = streamedEl.querySelector('.newsai-bubble') || streamedEl;
+    bubble.appendChild(wrap);
   }
 
   // ─── WhatsApp share button ────────────────────────────────────────────────
@@ -1984,7 +2829,56 @@ ${topicConstraint}`;
   //   Tier 2: Web Speech API — fallback when backend is unavailable.
   //
   // TTS tier availability — null=unchecked, true=working, false=skip this session
-  let backendTtsAvailable = null;
+  let backendTtsAvailable    = null;
+  let ttsBackendCooldownUntil = 0;  // epoch ms — backend TTS skipped until this time (429 recovery)
+
+  // ── AudioWorklet PCM processor (inlined as Blob URL — widget is self-contained) ──
+  // Loaded on first PCM stream use and cached; subsequent calls reuse the same URL.
+  //
+  // Why a ring-buffer worklet instead of scheduled AudioBufferSources:
+  //   The SSE approach decodes each WAV chunk and schedules it via source.start(time).
+  //   If a chunk's audio ends before the next AudioBuffer is decoded+scheduled, there's
+  //   an audible micro-pause (silence gap). The worklet approach is fundamentally different:
+  //   it runs at block rate (128 samples / ~5.8 ms), consuming from a FIFO queue that is
+  //   continuously topped up by the HTTP binary stream. As long as the queue stays ahead
+  //   of real-time — which 2-chunk lookahead synthesis guarantees — audio is seamless.
+  const _NEWSAI_PCM_WORKLET = `
+class NewsAiPcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._q   = [];     // queue of Float32Array slices
+    this._cur = null;   // slice currently being drained
+    this._off = 0;      // read offset into _cur
+    this._end = false;  // set when server stream is fully received
+    this.port.onmessage = ({ data }) => {
+      if (data.t === 'p') this._q.push(data.s);         // push PCM samples
+      else if (data.t === 'e') this._end = true;         // stream ended
+    };
+  }
+  process(inputs, outputs) {
+    const ch = outputs[0][0];
+    if (!ch) return true;
+    let w = 0;
+    while (w < ch.length) {
+      // Refill _cur from queue head.
+      if (!this._cur || this._off >= this._cur.length) {
+        if (!this._q.length) { ch.fill(0, w); break; }  // underrun — output silence
+        this._cur = this._q.shift();
+        this._off = 0;
+      }
+      const n = Math.min(this._cur.length - this._off, ch.length - w);
+      ch.set(this._cur.subarray(this._off, this._off + n), w);
+      this._off += n; w += n;
+    }
+    // Terminate processor only when stream is done AND queue is fully drained.
+    const drained = !this._q.length && (!this._cur || this._off >= this._cur.length);
+    if (this._end && drained) { this.port.postMessage('done'); return false; }
+    return true;
+  }
+}
+registerProcessor('newsai-pcm', NewsAiPcmProcessor);
+`;
+  let _pcmWorkletUrl = null;  // cached blob URL — avoids re-creating the blob on every speak()
 
   // Light clean for neural TTS: strip markdown but KEEP punctuation (helps prosody)
   // Light clean for neural TTS: strip markdown but KEEP punctuation (helps prosody)
@@ -2000,12 +2894,101 @@ ${topicConstraint}`;
       .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
       .replace(/https?:\/\/\S+/g, '')
       .replace(/[▸►•·–—]/g, '')
+      // Strip ALL invisible / zero-width characters — ZWSP, ZWNJ (U+200C), ZWJ (U+200D),
+      // LRM/RLM, soft hyphen, BOM, line/paragraph separators. Sakshi's CMS embeds these
+      // for Telugu ligature control; Sarvam's preprocessor stumbles on them and emits
+      // noise (a spurious leading "dot"), or treats them as word breaks mid-word.
+      .replace(/[\u200B-\u200F\u00AD\uFEFF\u2028\u2029]/g, '')
+      // Convert danda (।) and double-danda (॥) → period — Sarvam reads these aloud as
+      // "dot" instead of treating them as silent sentence-end pauses.
+      .replace(/[।॥]/g, '.')
+      // Horizontal ellipsis (… U+2026) is a SINGLE char — `\.{2,}` below never matched it,
+      // and Sarvam speaks it as "dot dot dot". Normalise to a comma pause.
+      .replace(/[…⋯᠁]/g, ',')
+      // Normalize consecutive dots (.. or ...) — Sarvam treats them as sentence-end pauses.
+      // Replace with a comma so intonation stays natural without a long gap.
+      .replace(/\.{2,}/g, ',')
+      // Separator / horizontal-rule lines are never speech.
+      .replace(/^[ \t]*[-—–_=~]{2,}[ \t]*$/gm, '')
+      // Collapse isolated punctuation runs (". . .") that Sarvam reads mark-by-mark.
+      .replace(/(?:[.,;:]\s+){2,}[.,;:]?\s*/g, '. ')
+      // Strip parenthetical photo/video annotations that appear in Sakshi headlines
+      // e.g. "(చిత్రాలు)", "(వీడియో)", "(photos)", "(video)". These aren't news content.
+      .replace(/\(\s*(?:చిత్రాలు|ఫోటోలు|ఫొటోలు|వీడియో|video|photos?|gallery)\s*\)/gi, '')
+      // Remove curly / directional single quotes that Sarvam may pause on
+      .replace(/['']/g, '')
       .replace(/[ \t]{2,}/g, ' ')       // collapse multiple spaces (NOT newlines)
       .replace(/\n{3,}/g, '\n\n')       // cap at double newline
+      // Never open the utterance with punctuation — Sarvam vocalises it ("dot", "dash").
+      .replace(/^[\s.,;:!?।॥…·•*_=~\-–—]+/, '')
       .trim();
   }
 
+  // ⚡ Fast audio — trailing-silence trim for gapless chunk chaining.
+  // Sarvam WAV chunks sometimes carry trailing digital silence; scheduling the NEXT
+  // chunk at `startAt + audioBuf.duration` would then leave an audible gap. We instead
+  // schedule against the audio's REAL end (last non-silent sample + a 5ms tail so the
+  // waveform isn't hard-clipped), producing seamless back-to-back playback.
+  function trimTrailingSilence(audioBuffer, threshold = 0.0005) {
+    try {
+      const data = audioBuffer.getChannelData(0);
+      let endSample = data.length - 1;
+      while (endSample > 0 && Math.abs(data[endSample]) < threshold) endSample--;
+      // Keep a tiny 5ms tail to avoid a hard cutoff click.
+      const keepSamples = Math.min(
+        endSample + Math.floor(audioBuffer.sampleRate * 0.005),
+        data.length
+      );
+      const trimmedDuration = keepSamples / audioBuffer.sampleRate;
+      // Guard against pathological all-silence buffers → fall back to full duration.
+      return trimmedDuration > 0.02 ? trimmedDuration : audioBuffer.duration;
+    } catch (_) {
+      return audioBuffer.duration;
+    }
+  }
+
+  // ⚡ Fast audio — thin "audio loading" progress bar under a message.
+  // Pure perceived-latency win: gives the user immediate feedback that audio is
+  // coming while chunk 0 synthesises. Removed the instant real audio starts playing.
+  function createTtsLoader(btn) {
+    try {
+      const msgEl = btn.closest('.newsai-msg');
+      if (!msgEl) return null;
+      const bar = document.createElement('div');
+      bar.className = 'newsai-tts-loading';
+      bar.innerHTML = '<div class="newsai-tts-loading-fill"></div>';
+      msgEl.appendChild(bar);
+      return bar;
+    } catch (_) { return null; }
+  }
+
+  // Show a temporary non-blocking toast inside the chat panel (for TTS rate-limit notice)
+  function _showTtsToast(seconds) {
+    const panel = document.getElementById('newsai-panel');
+    if (!panel) return;
+    const existing = panel.querySelector('.newsai-tts-toast');
+    if (existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.className = 'newsai-tts-toast';
+    toast.textContent = currentLang === 'te'
+      ? `🔊 Sarvam TTS ${seconds}s విరామం — స్వయంచాలకంగా పునఃప్రారంభమవుతుంది`
+      : `🔊 Sarvam voice paused ${seconds}s (rate limit) — will resume automatically`;
+    panel.appendChild(toast);
+    setTimeout(() => toast.remove(), (seconds + 2) * 1000);
+  }
+
   async function startSpeaking(btn, text) {
+    // Guard: never call TTS with empty text — backend returns HTTP 400 which can
+    // permanently disable backend TTS for the session if the error handler treats it as fatal.
+    if (!text || !text.trim()) return;
+
+    // Sanitise for spoken output BEFORE any TTS tier sees the text — strips
+    // markdown, UI prompts, photo-gallery article lines, and cross-contaminated
+    // headline echoes. Both the Sarvam backend path (stripMarkdownForTTS) and the
+    // Web Speech fallback (cleanForSpeech) consume this cleaned text.
+    text = prepareForTTS(text);
+    if (!text.trim()) return;   // nothing speakable remained after sanitisation
+
     if (window.speechSynthesis) speechSynthesis.cancel();
     if (currentUtterance?._type === 'backend') { try { currentUtterance.stop(); } catch (_) {} }
 
@@ -2016,12 +2999,23 @@ ${topicConstraint}`;
     btn.innerHTML = ICONS.speakerOff + ' <span style="font-size:10px">' + t('speakStop') + '</span>';
     btn.classList.add('newsai-speaking');
 
+    const myGen = ++speakGen; // unique stamp for THIS startSpeaking call
+    let   ttsLoaderEl = null; // ⚡ Fast audio — progress bar handle (see createTtsLoader)
+    const removeTtsLoader = () => { if (ttsLoaderEl) { try { ttsLoaderEl.remove(); } catch (_) {} ttsLoaderEl = null; } };
     const resetBtn = () => {
+      removeTtsLoader();
       btn.innerHTML = ICONS.speaker; btn.classList.remove('newsai-speaking');
-      // Only clear global speaking state if this button is still the active
-      // speaker — a stale async callback must not clobber a newer speak request.
-      if (speakingMsgEl !== btn) return;
+      // Only clear global speaking state if this button is STILL the active speaker
+      // AND no newer speak call has started (speakGen !== myGen means a newer call
+      // already took over — clearing state here would race with and clobber it).
+      if (speakingMsgEl !== btn || speakGen !== myGen) return;
       isSpeaking = false; speakingMsgEl = null; currentUtterance = null;
+      // Podcast voice mode: AI finished speaking → resume listening automatically.
+      if (voiceMode) {
+        voiceProcessing = false;
+        setVoiceStatus('listening');
+        setTimeout(() => { if (voiceMode && !isSpeaking) startVoiceListening(); }, 400);
+      }
     };
 
     // Language for TTS follows the active pill (currentLang), not text-content detection.
@@ -2036,18 +3030,33 @@ ${topicConstraint}`;
     // If the extracted headlines alone fit within 2000 chars, send only headlines
     // (gives cleaner audio). Otherwise fall back to the first 2000 chars of full text.
     const neuralFull = stripMarkdownForTTS(text);
-    const TTS_LIMIT = 2000;
+    const TTS_LIMIT = 4000;  // streaming starts playback after chunk 0, so longer text is fine
     let neuralText;
     if (neuralFull.length > TTS_LIMIT) {
-      // Cap at 6 headlines to keep audio within the 25s fetch timeout.
-      const shortLines = neuralFull.split('\n').filter(l => l.trim().length > 0 && l.trim().length <= 120).slice(0, 6);
-      const headlinesOnly = shortLines.join('\n');
+      // For long responses (digest lists), extract HEADLINE-only lines.
+      // After stripMarkdownForTTS, **Headline** becomes its own line and " — Description"
+      // is a separate line starting with "—". We keep only the headline lines (not "—" lines)
+      // and cap at 12 so we speak at most 12 headlines — one per article.
+      // Old code used slice(0,6) on ALL short lines (headlines + descriptions mixed) which
+      // gave only 3 headlines because 6 slots = 3 headlines + 3 descriptions.
+      const allLines = neuralFull.split('\n').filter(l => l.trim().length > 0);
+      const headlineLines = allLines.filter(l => {
+        const t = l.trim();
+        // Skip description lines (start with dash/em-dash) and very long lines
+        return t.length <= 160 && !t.startsWith('—') && !t.startsWith('-') && !t.startsWith('•');
+      }).slice(0, 12);  // at most 12 headlines
+      const headlinesOnly = headlineLines.join('\n');
       if (headlinesOnly.length >= 30) {
-        neuralText = headlinesOnly.length > TTS_LIMIT
-          ? headlinesOnly.slice(0, headlinesOnly.lastIndexOf('\n', TTS_LIMIT) || TTS_LIMIT)
-          : headlinesOnly;
+        if (headlinesOnly.length > TTS_LIMIT) {
+          // Guard: cap within TTS_LIMIT at a newline boundary
+          const cut = headlinesOnly.lastIndexOf('\n', TTS_LIMIT);
+          neuralText = headlinesOnly.slice(0, cut > 0 ? cut : TTS_LIMIT);
+        } else {
+          neuralText = headlinesOnly;
+        }
       } else {
-        neuralText = neuralFull.slice(0, neuralFull.lastIndexOf(' ', TTS_LIMIT) || TTS_LIMIT);
+        const cut = neuralFull.lastIndexOf(' ', TTS_LIMIT);
+        neuralText = neuralFull.slice(0, cut > 0 ? cut : TTS_LIMIT);
       }
     } else {
       neuralText = neuralFull;
@@ -2056,12 +3065,158 @@ ${topicConstraint}`;
     // Guard: if stripping markdown left us with nothing, bail — don't send a 400.
     if (!neuralText || !neuralText.trim()) { resetBtn(); return; }
 
-    // ── Tier 1: Backend /api/tts (Sarvam Bulbul v3, WAV output) ─────────────
-    // AudioContext created synchronously inside the click handler (gesture context)
-    // so Chrome's autoplay permission is granted before the async fetch.
-    // Both Telugu and English use Sarvam bulbul:v3 with emotion-aware pace control.
-    // AudioContext.decodeAudioData handles WAV natively — no MP3 decoder needed.
-    if (backendTtsAvailable !== false) {
+    // ── Tier 1a: /api/tts/stream-binary — AudioWorklet PCM ring buffer ──────────
+    // AudioContext MUST be created synchronously inside a user-gesture handler.
+    // We do it here (before any await) so Chrome/Safari grant autoplay permission.
+    //
+    // Why this is better than the SSE approach:
+    //   SSE: decode WAV → schedule AudioBufferSource at a future timestamp → gaps if
+    //        the next chunk isn't decoded in time.
+    //   Binary PCM: Int16 bytes arrive → ÷32768 → pushed into an AudioWorklet FIFO.
+    //   The worklet drains the FIFO at block rate (128 samples / ~5.8 ms). As long as
+    //   the queue stays non-empty — guaranteed by 2-chunk lookahead synthesis — audio
+    //   is gapless. No WAV decode, no base64, no scheduling.
+    if (backendTtsAvailable !== false && Date.now() >= ttsBackendCooldownUntil
+        && typeof AudioWorkletNode !== 'undefined') {
+
+      let _pcmAudioCtx;
+      let _pcmHandled = false;
+
+      try {
+        _pcmAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 22050 });
+        if (_pcmAudioCtx.state === 'suspended') await _pcmAudioCtx.resume();
+
+        // Load worklet from cached blob URL (created once, reused every speak call).
+        if (!_pcmWorkletUrl) {
+          const blob = new Blob([_NEWSAI_PCM_WORKLET], { type: 'application/javascript' });
+          _pcmWorkletUrl = URL.createObjectURL(blob);
+        }
+        await _pcmAudioCtx.audioWorklet.addModule(_pcmWorkletUrl);
+
+        const worklet = new AudioWorkletNode(_pcmAudioCtx, 'newsai-pcm', { outputChannelCount: [1] });
+        const gain    = _pcmAudioCtx.createGain();
+        worklet.connect(gain);
+        gain.connect(_pcmAudioCtx.destination);
+
+        const _pcmAbort = new AbortController();
+        currentUtterance = {
+          _type: 'backend-pcm',
+          stop: () => {
+            try { _pcmAbort.abort(); } catch (_) {}
+            try {
+              if (_pcmAudioCtx && _pcmAudioCtx.state !== 'closed') {
+                gain.gain.setValueAtTime(gain.gain.value, _pcmAudioCtx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.0001, _pcmAudioCtx.currentTime + 0.08);
+              }
+            } catch (_) {}
+            setTimeout(() => { if (_pcmAudioCtx && _pcmAudioCtx.state !== 'closed') try { _pcmAudioCtx.close(); } catch (_) {} }, 130);
+          },
+        };
+
+        // worklet sends 'done' when it has drained the last sample → reset button.
+        worklet.port.onmessage = (e) => {
+          if (e.data === 'done') {
+            if (_pcmAudioCtx && _pcmAudioCtx.state !== 'closed') try { _pcmAudioCtx.close(); } catch (_) {}
+            resetBtn();
+          }
+        };
+
+        console.log(`[NewsAI TTS] Binary PCM request (${lang}, ${neuralText.length} chars)…`);
+        ttsLoaderEl = createTtsLoader(btn);
+
+        const resp = await fetch(`${backendBaseUrl}/api/tts/stream-binary`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ text: neuralText, lang, voice: (widgetConfig && widgetConfig.ttsVoice) || undefined }),
+          signal:  _pcmAbort.signal,
+        });
+
+        if (resp.status === 429) {
+          ttsBackendCooldownUntil = Date.now() + 60_000;
+          _showTtsToast(60);
+          throw new Error('429');
+        }
+        if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+        backendTtsAvailable = true;
+
+        const reader     = resp.body.getReader();
+        let leftover     = new Uint8Array(0);
+        let firstData    = true;
+        let totalSamples = 0;
+        const streamStart = Date.now();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (speakingMsgEl !== btn) { reader.cancel(); break; } // superseded
+
+          // Merge with any leftover bytes from previous read.
+          const merged   = new Uint8Array(leftover.length + value.length);
+          merged.set(leftover);
+          merged.set(value, leftover.length);
+
+          // Must process an even number of bytes (16-bit samples = 2 bytes each).
+          const complete = merged.length - (merged.length % 2);
+          if (complete > 0) {
+            const int16   = new Int16Array(merged.buffer, 0, complete >>> 1);
+            const float32 = new Float32Array(int16.length);
+            for (let k = 0; k < int16.length; k++) float32[k] = int16[k] / 32768.0;
+            // Transfer ownership (zero-copy) to the AudioWorklet thread.
+            worklet.port.postMessage({ t: 'p', s: float32 }, [float32.buffer]);
+            totalSamples += int16.length;
+
+            if (firstData) {
+              removeTtsLoader();
+              firstData = false;
+              console.log(`[NewsAI TTS] ✅ PCM stream playing (${lang})`);
+            }
+          }
+          leftover = (complete < merged.length) ? merged.slice(complete) : new Uint8Array(0);
+        }
+
+        // Signal the worklet that no more samples are coming.
+        worklet.port.postMessage({ t: 'e' });
+        _pcmHandled = true;
+
+        // Safety reset in case the worklet's 'done' message never fires
+        // (e.g. if the stream ended early / all chunks errored on the server).
+        // Use the higher of: computed sample duration OR wall-clock streaming time,
+        // so that chunk-error scenarios (where totalSamples underestimates the
+        // actual audio the user hears) still wait long enough before resetting.
+        const sampleDurMs    = (totalSamples / 22050) * 1000;
+        const streamElapsedMs = Date.now() - streamStart;
+        const estMs = Math.max(4000, Math.max(sampleDurMs, streamElapsedMs) + 2000);
+        setTimeout(() => { if (isSpeaking && speakingMsgEl === btn) resetBtn(); }, estMs);
+
+      } catch (err) {
+        removeTtsLoader();
+        if (_pcmAudioCtx && _pcmAudioCtx.state !== 'closed') try { _pcmAudioCtx.close(); } catch (_) {}
+        if (err.name === 'AbortError') return;  // user stopped — don't start SSE either
+        if (String(err.message) !== '429') {
+          // Any non-429 error: log and fall through to SSE.
+          console.warn('[NewsAI TTS PCM] Falling through to SSE:', err.message);
+          // If the AudioWorklet module load itself failed (CSP blocking blob: URLs, old browser),
+          // revoke and clear the cached URL so the next speak() recreates a fresh blob
+          // rather than re-attempting a URL that the browser has already rejected.
+          // Also fires when the page CSP (e.g. Sakshi.com) blocks blob: scripts —
+          // matches DOMException messages like "Failed to load", "ContentSecurityPolicy", etc.
+          if ((/worklet|module|blob|csp|content.?security|policy|failed to load/i.test(err.message) || err instanceof DOMException) && _pcmWorkletUrl) {
+            try { URL.revokeObjectURL(_pcmWorkletUrl); } catch (_) {}
+            _pcmWorkletUrl = null;
+          }
+        }
+        // 429: cooldown already set; SSE check below also sees it → falls to Web Speech
+      }
+
+      if (_pcmHandled) return; // PCM success → audio handled, skip SSE
+    }
+
+    // ── Tier 1b: Backend /api/tts/stream (SSE, WAV chunks) ─────────────────────
+    // Fallback when AudioWorklet is unavailable (old Safari, CSP that blocks blob: URLs).
+    // AudioContext is created SYNCHRONOUSLY here (inside the user-gesture handler)
+    // so Chrome/Safari grant autoplay permission before any async work starts.
+    // Each WAV chunk is decoded and scheduled via source.start(time) for gapless chain.
+    if (backendTtsAvailable !== false && Date.now() >= ttsBackendCooldownUntil) {
       let audioCtx;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -2069,60 +3224,163 @@ ${topicConstraint}`;
       } catch (_) { audioCtx = null; }
 
       if (audioCtx) {
+        const abortCtrl   = new AbortController();
+        const activeSrcs  = [];   // track all AudioBufferSources so stop() can halt them
+        let   nextStart   = 0;    // audioCtx-time cursor — updated per chunk
+
+        currentUtterance = {
+          _type: 'backend',
+          stop: () => {
+            try { abortCtrl.abort(); } catch (_) {}
+            for (const s of activeSrcs) { try { s.stop(); } catch (_) {} }
+            if (audioCtx && audioCtx.state !== 'closed') try { audioCtx.close(); } catch (_) {}
+          },
+        };
+
         try {
-          console.log(`[NewsAI TTS] Backend TTS request (${lang}, ${neuralText.length} chars)...`);
-          const resp = await fetch(`${backendBaseUrl}/api/tts`, {
-            method: 'POST',
+          console.log(`[NewsAI TTS] Streaming request (${lang}, ${neuralText.length} chars)...`);
+          // ⚡ Fast audio — show the "audio loading" bar the moment we ask for audio.
+          ttsLoaderEl = createTtsLoader(btn);
+          let expectedChunks = 0; // populated from the 'meta' event
+          const resp = await fetch(`${backendBaseUrl}/api/tts/stream`, {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: neuralText, lang }),
-            signal: AbortSignal.timeout(25_000),
+            body:    JSON.stringify({ text: neuralText, lang, voice: (widgetConfig && widgetConfig.ttsVoice) || undefined }),
+            signal:  abortCtrl.signal,
           });
-          if (resp.ok) {
-            backendTtsAvailable = true;
-            const arrayBuffer = await resp.arrayBuffer();
-            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-            // Superseded: user started speaking another message while this fetch
-            // was in flight — don't start a second, overlapping audio stream.
-            if (speakingMsgEl !== btn) { try { audioCtx.close(); } catch (_) {} return; }
-            const source = audioCtx.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioCtx.destination);
-            source.onended = () => { try { audioCtx.close(); } catch (_) {} resetBtn(); };
-            source.start();
-            currentUtterance = {
-              _type: 'backend',
-              stop: () => { try { source.stop(); audioCtx.close(); } catch (_) {} },
-            };
-            console.log(`[NewsAI TTS] ✅ Backend Edge TTS playing (${lang})`);
-            return; // success — skip Web Speech fallback
-          } else {
-            throw new Error(`HTTP ${resp.status}`);
+
+          if (resp.status === 429) {
+            // Rate limited — cooldown 60s then auto-recover (not a permanent failure)
+            const cooldownMs = 60 * 1000;
+            ttsBackendCooldownUntil = Date.now() + cooldownMs;
+            _showTtsToast(60);
+            throw new Error('HTTP 429');
           }
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          backendTtsAvailable = true;
+
+          // Guard: resp.body is null in some environments (very old browsers, opaque responses)
+          if (!resp.body) throw new Error('SSE stream unavailable');
+          const reader    = resp.body.getReader();
+          const decoder    = new TextDecoder();
+          let   sseBuf     = '';
+          let   chunkIdx   = 0;
+          let   lastSrc    = null;
+          let   superseded = false; // set when a newer speak takes over mid-stream
+
+          outer: while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (speakingMsgEl !== btn) { superseded = true; reader.cancel(); break; } // newer speak took over
+
+            sseBuf += decoder.decode(value, { stream: true });
+            const parts = sseBuf.split('\n\n');
+            sseBuf = parts.pop(); // last entry may be an incomplete SSE frame
+
+            for (const part of parts) {
+              const line = part.trim();
+              if (!line.startsWith('data: ')) continue;
+              let ev;
+              try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+
+              if (ev.type === 'meta') {
+                // ⚡ Fast audio — how many chunks to expect, for the progress bar.
+                expectedChunks = ev.total || 0;
+
+              } else if (ev.type === 'chunk' && ev.audio) {
+                // ⚡ Fast audio — advance the loading bar as each chunk lands.
+                if (ttsLoaderEl && expectedChunks > 0) {
+                  const pct = Math.min(100, Math.round(((ev.chunk + 1) / expectedChunks) * 100));
+                  const fill = ttsLoaderEl.firstChild;
+                  if (fill) { fill.style.width = pct + '%'; ttsLoaderEl.classList.add('newsai-tts-loading-active'); }
+                }
+                // base64 WAV → Uint8Array → ArrayBuffer copy (slice avoids detach issues)
+                const bin   = atob(ev.audio);
+                const bytes = new Uint8Array(bin.length);
+                for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+
+                try {
+                  const audioBuf = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+                  if (speakingMsgEl !== btn) { superseded = true; break outer; } // superseded during decode
+
+                  const src      = audioCtx.createBufferSource();
+                  src.buffer     = audioBuf;
+                  // GainNode per chunk — lets us apply a short fade-out ramp at the
+                  // end of each chunk's scheduled window. Without this, hard-cutting
+                  // from a non-zero PCM sample to silence causes an audible click/pop
+                  // at the inter-chunk boundary in the AudioContext timeline.
+                  const gainNode = audioCtx.createGain();
+                  src.connect(gainNode);
+                  gainNode.connect(audioCtx.destination);
+                  activeSrcs.push(src);
+
+                  // First chunk: play 20ms from now (buffer for decode jitter).
+                  // Subsequent: chain immediately after the previous chunk ends.
+                  // ⚡ Fast audio — schedule against the trimmed (silence-free) duration
+                  // so chunks butt up seamlessly instead of leaving a trailing-silence gap.
+                  const playDur = trimTrailingSilence(audioBuf);
+                  const startAt = chunkIdx === 0
+                    ? audioCtx.currentTime + 0.02
+                    : Math.max(nextStart, audioCtx.currentTime + 0.01);
+                  src.start(startAt);
+                  // Schedule a 10ms gain ramp to silence at the very end of this chunk.
+                  // This removes the hard waveform discontinuity at the chunk boundary.
+                  const fadeOutAt = startAt + playDur - 0.010;
+                  gainNode.gain.setValueAtTime(1.0, Math.max(startAt, fadeOutAt));
+                  gainNode.gain.linearRampToValueAtTime(0.0001, startAt + playDur);
+                  nextStart = startAt + playDur;
+                  lastSrc   = src;
+                  chunkIdx++;
+
+                  if (chunkIdx === 1) {
+                    // Real audio is now playing — drop the loading bar immediately.
+                    removeTtsLoader();
+                    console.log(`[NewsAI TTS] ✅ Streaming TTS playing (${lang})`);
+                  }
+                } catch (e) {
+                  console.warn('[NewsAI TTS] Chunk decode error:', e);
+                }
+
+              } else if (ev.type === 'done') {
+                // All chunks streamed — wire resetBtn to the last scheduled source
+                if (lastSrc) {
+                  lastSrc.onended = () => { if (audioCtx && audioCtx.state !== 'closed') try { audioCtx.close(); } catch (_) {} resetBtn(); };
+                } else {
+                  resetBtn(); // nothing decoded (empty response)
+                }
+              } else if (ev.type === 'error') {
+                console.warn(`[NewsAI TTS] Server chunk error: ${ev.message}`);
+              }
+            }
+          }
+
+          // Post-stream cleanup:
+          removeTtsLoader(); // ⚡ Fast audio — bar never outlives the stream
+          if (lastSrc) {
+            // At least one chunk decoded and started — audio is/was playing.
+            // Wire resetBtn to the last chunk's onended (in case 'done' event didn't arrive).
+            if (!lastSrc.onended) {
+              lastSrc.onended = () => { if (audioCtx && audioCtx.state !== 'closed') try { audioCtx.close(); } catch (_) {} resetBtn(); };
+            }
+            return; // audio handled — skip Web Speech
+          }
+          // No audio decoded: either superseded (newer speak took over) or Sarvam failed all chunks.
+          if (audioCtx && audioCtx.state !== 'closed') try { audioCtx.close(); } catch (_) {}
+          if (superseded) return; // newer speak owns this button — do NOT start Web Speech for old btn
+          // ALL chunks errored from Sarvam — fall through to Web Speech API as last resort
+          console.warn('[NewsAI TTS] All Sarvam chunks failed — falling back to Web Speech');
+
         } catch (e) {
-          console.warn('[NewsAI TTS] Backend unavailable, falling back to Web Speech:', e.message);
-          try { audioCtx.close(); } catch (_) {}
-          // Permanently disable ONLY on HTTP errors (server is up but request is broken).
-          // "Failed to fetch" / "NetworkError" = server not running — keep retrying next click.
-          // Timeouts = server overloaded — keep retrying too.
-          // Check e.name for DOMException types (TimeoutError/AbortError live in .name, not .message)
-          // All HTTP errors (4xx and 5xx) treated as transient — our backend wraps Sarvam
-          // API errors as HTTP 500, so a single Sarvam failure must not lock out TTS for
-          // the whole session. Only true network failure permanently disables.
-          // Network/timeout errors = server unreachable (transient — keep retrying).
-          const isTransient = !e.message
-            || e.name === 'TimeoutError'
-            || e.name === 'AbortError'
-            || /failed to fetch|networkerror|fetch|timed out/i.test(e.message)
-            || /HTTP [45]\d\d/.test(e.message);  // 4xx AND 5xx = retry next click
-          if (!isTransient) {
-            backendTtsAvailable = false;
-            console.warn('[NewsAI TTS] Permanently disabling backend TTS (network unreachable)');
-          } else {
-            backendTtsAvailable = null;
-          }
+          removeTtsLoader(); // ⚡ Fast audio — clear bar on any streaming failure
+          if (e.name === 'AbortError') { resetBtn(); return; } // user pressed stop
+          console.warn('[NewsAI TTS] Streaming failed, falling back to Web Speech:', e.message);
+          if (audioCtx && audioCtx.state !== 'closed') try { audioCtx.close(); } catch (_) {}
+          // 429: cooldown already set — don't permanently disable
+          if (/HTTP \d/.test(e.message) && e.message !== 'HTTP 429') backendTtsAvailable = false;
         }
-      }
-    }
+        // Non-AbortError failure: fall through to Web Speech API below
+      } // closes if (audioCtx)
+    } // closes if (backendTtsAvailable !== false)
 
     // ── Tier 2: Web Speech API fallback ──────────────────────────────────────
     // Superseded while awaiting the backend fetch — a newer speak owns playback now.
@@ -2153,7 +3411,7 @@ ${topicConstraint}`;
     if (isTeluguText && voice && !voice.lang.startsWith('te') && !voice.lang.startsWith('hi')) {
       const toast = document.createElement('div');
       toast.style.cssText = 'position:fixed;bottom:110px;left:50%;transform:translateX(-50%);background:#444;color:#fff;padding:7px 16px;border-radius:20px;font-size:12px;z-index:999999;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
-      toast.textContent = 'Telugu voice not available on this device';
+      toast.textContent = t('teVoiceFallback');
       document.body.appendChild(toast);
       setTimeout(() => toast.remove(), 3500);
       resetBtn();
@@ -2166,7 +3424,7 @@ ${topicConstraint}`;
     const utterance    = new SpeechSynthesisUtterance(cleanText);
     utterance.lang     = uttLang;
     if (voice) utterance.voice = voice;
-    utterance.rate     = 0.92;
+    utterance.rate     = 1.05;  // natural news-anchor pace
     utterance.onend    = resetBtn;
     utterance.onerror  = (e) => {
       if (e.error !== 'interrupted') console.warn('[NewsAI TTS] Web Speech error:', e.error);
@@ -2179,8 +3437,10 @@ ${topicConstraint}`;
   }
 
   function stopSpeaking() {
+    liveTtsGen++;           // cancel any in-progress drainLiveTts loop
     if (currentUtterance) {
-      if (currentUtterance._type === 'backend') {
+      // Use .stop() for any backend TTS path (backend-pcm, backend, etc.)
+      if (typeof currentUtterance.stop === 'function') {
         currentUtterance.stop();
       } else if (window.speechSynthesis) {
         speechSynthesis.cancel();
@@ -2224,8 +3484,62 @@ ${topicConstraint}`;
    * Extracts URLs before escaping so they survive HTML entity conversion.
    */
   function renderBotText(text) {
-    // Strip internal content marker — AI sometimes echoes it despite prompt instructions
+    // Strip internal content markers — AI sometimes echoes these despite prompt instructions
     text = text.replace(/\[HEADLINE ONLY[^\]]*\]/g, '').replace(/\[ *HEADLINE ONLY[^\]]*\]/gi, '');
+    // Strip buildArticleContext internal markers that Gemini occasionally echoes
+    text = text.replace(/ ?[—–] ?\(same as headline[^)]*\)/gi, '');
+    text = text.replace(/\(same as headline[^)]*\)/gi, '');
+    text = text.replace(/ ?[—–] ?\(not available\)/gi, '');
+    text = text.replace(/\(not available\)/gi, '');
+    // Strip Gemini headline echo: **X** — X (description is a normalized copy of the headline).
+    // Happens when Gemini ignores Rule 5 and repeats the headline as its own description.
+    text = text.replace(/\*\*([^*\n]+)\*\*\s*[—–]\s*([^\n*]{5,})/g, (match, headline, desc) => {
+      const norm = s => s.replace(/[\u200B-\u200F\u00AD\uFEFF\u2028\u2029]/g, '').replace(/[.!?\u2026]+$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return norm(desc) === norm(headline) ? `**${headline}**` : match;
+    });
+    // Strip headline-tail repetition: Telugu cinema headlines often end with a person's
+    // name ("Quote: Actor Name") and Gemini starts the description with that same name
+    // ("Actor Name says X…"). Remove the repeated tail words so the description is fresh.
+    text = text.replace(/\*\*([^*\n]+)\*\*\s*[—–]\s*([^\n*]{5,})/g, (match, headline, desc) => {
+      const nw = s => s.replace(/[^\w\sఀ-౿]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+      const headWords = nw(headline).split(' ').filter(Boolean);
+      const descWords = desc.trim().split(/\s+/);
+      const descNorm = nw(desc);
+      // Check ALL contiguous word sequences of length 2-5 from the headline
+      // (not just the tail) — catches "సల్మాన్ ఖాన్" appearing mid-headline while
+      // the body starts with that same name.
+      for (let i = 0; i <= headWords.length - 2; i++) {
+        for (let n = Math.min(5, headWords.length - i); n >= 2; n--) {
+          const seq = headWords.slice(i, i + n).join(' ');
+          if (seq.length < 5) continue;
+          if (descNorm.startsWith(seq)) {
+            const rest = descWords.slice(n).join(' ').replace(/^[\s:,.।—\-–]+/, '').trim();
+            if (rest.length >= 15) return `**${headline}** — ${rest}`;
+          }
+        }
+      }
+      return match;
+    });
+
+    // ── Newline-recovery pass (runs BEFORE auto-bold) ────────────────────────
+    // Flash-Lite sometimes omits the blank line between articles, joining them as:
+    //   "...description. NextHeadline — next desc..."
+    // Insert \n before the next headline so the auto-bold regex (below) can see it.
+    // Pattern: sentence-ending punct immediately followed by Telugu or Uppercase English
+    // text that itself precedes a " — " separator (marks a headline).
+    text = text.replace(/([.!?।])([ఀ-౿][^\n—–]{5,200}? [—–] )/g, '$1\n$2');
+    text = text.replace(/([.!?।])([A-Z][^\n—–]{5,200}? [—–] )/g, '$1\n$2');
+    // ── Auto-bold safety net ──────────────────────────────────────────────────
+    // Gemini occasionally outputs "Headline — description" without **bold** markers.
+    // Any line that (a) does not already start with ** and (b) contains " — "
+    // has its pre-dash portion auto-wrapped in **...**  so the display is consistent.
+    // The Telugu em-dash separator can appear as — (U+2014) or – (U+2013).
+    text = text.replace(
+      /^(?!\*\*)([^\n*]{10,300}?) [—–] (.+)$/gm,
+      '**$1** — $2'
+    );
+    // ─────────────────────────────────────────────────────────────────────────
+
     const urls = [];
     // Step 1: extract URLs before HTML-escaping (& in URLs becomes &amp; otherwise)
     const placeholder = text.replace(/https?:\/\/[^\s<>"']+/g, function(url) {
@@ -2234,10 +3548,18 @@ ${topicConstraint}`;
       urls.push(clean);
       return '\x01' + (urls.length - 1) + '\x01';
     });
+    // Step 1b: add \n AFTER closing **bold** when it's immediately followed by text.
+    // Previous regex added \n before opening ** which broke mid-headline: "**headlin\n**description"
+    // caused the bold regex to fail (it rejects \n inside **...**). This version correctly
+    // places the break AFTER the closing **, preserving the full **headline** for rendering.
+    // Also ensures a new **headline** always starts on its own line.
+    const withBreaks = placeholder
+      .replace(/(\*\*[^*\n]{1,150}?\*\*)(?! ?[—–])([^\n])/g, '$1\n$2')   // add \n after **X** only when NOT followed by em-dash (keeps "headline — desc" on one line)
+      .replace(/([^\n])(\*\*[^\s*])/g, '$1\n$2');               // ensure new **headline starts on own line
     // Step 2: HTML-escape (also converts \n → <br>)
-    let html = escHtml(placeholder);
+    let html = escHtml(withBreaks);
     // Step 2b: render **bold** headlines — applied after escaping so < > are safe
-    html = html.replace(/\*\*([^*\n<]{1,120}?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*\*([^*\n<]{1,150}?)\*\*/g, '<strong>$1</strong>');
     // Step 3: restore URLs as anchor tags
     html = html.replace(/\x01(\d+)\x01/g, function(_, idx) {
       const url = urls[parseInt(idx, 10)];
@@ -2247,6 +3569,22 @@ ${topicConstraint}`;
              'style="color:var(--newsai-primary,#C0392B);word-break:break-all;text-decoration:underline;">' +
              safeText + '</a>';
     });
+    // Step 4: copy-paste structure preservation.
+    // Wrap each article line in a block-level <div> so the clipboard serializes a
+    // newline between them (WhatsApp, Notes, email body strip stray <br>s).
+    // Gemini often emits a SINGLE \n between articles → single <br>, so the old
+    // <br><br>-only trigger never fired. Trigger for list responses (3+ bold
+    // headlines) and split on any <br>. Fall back to <br><br> for non-list text.
+    const boldLineCount = (text.match(/\*\*[^*\n]+\*\*/g) || []).length;
+    if (boldLineCount >= 3) {
+      const parts = html.split(/<br\s*\/?>/i).map(s => s.trim()).filter(Boolean);
+      if (parts.length >= 3) {
+        html = parts.map(s => `<div style="margin-bottom:7px">${s}</div>`).join('');
+      }
+    } else if (/<br><br>/i.test(html)) {
+      html = html.split(/<br><br>/i).map(s => s.trim()).filter(Boolean)
+        .map(s => `<div style="margin-bottom:8px">${s}</div>`).join('');
+    }
     return html;
   }
 
@@ -2312,7 +3650,14 @@ ${topicConstraint}`;
   }
 
   function saveSession() {
-    try { sessionStorage.setItem('newsai_history', JSON.stringify(conversationHistory)); } catch (_) {}
+    // Cap at the last 20 messages before saving to avoid hitting the sessionStorage quota.
+    try { sessionStorage.setItem('newsai_history', JSON.stringify(conversationHistory.slice(-20))); } catch (_) {}
+  }
+
+  // Explicit reset of the persisted session history (not called on normal page close —
+  // sessionStorage clears itself when the tab closes). Wrapped in try/catch for private mode.
+  function clearHistory() {
+    try { sessionStorage.removeItem('newsai_history'); } catch (_) {}
   }
 
   // ─── Content loading status ────────────────────────────────────────────────
@@ -2343,6 +3688,27 @@ ${topicConstraint}`;
       document.head.appendChild(link);
     }
 
+    // Load Noto Sans Telugu for better text rendering on Windows/Android
+    if (!document.getElementById('newsai-noto-font')) {
+      // Preconnect for faster font load
+      const preconn = document.createElement('link');
+      preconn.rel = 'preconnect';
+      preconn.href = 'https://fonts.googleapis.com';
+      preconn.crossOrigin = 'anonymous';
+      document.head.appendChild(preconn);
+      const preconn2 = document.createElement('link');
+      preconn2.rel = 'preconnect';
+      preconn2.href = 'https://fonts.gstatic.com';
+      preconn2.crossOrigin = 'anonymous';
+      document.head.appendChild(preconn2);
+      // Non-blocking font load
+      const fontLink = document.createElement('link');
+      fontLink.id = 'newsai-noto-font';
+      fontLink.rel = 'stylesheet';
+      fontLink.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+Telugu:wght@400;600;700&display=swap';
+      document.head.appendChild(fontLink);
+    }
+
     const el = buildWidget(config);
 
     // Fetch Gemini context cache ID in background — used by callGemini()
@@ -2356,6 +3722,19 @@ ${topicConstraint}`;
         }
       })
       .catch(() => {});  // cache miss — fall through to full system prompt
+
+    // Pre-fetch digest at startup — will be ready by the time user opens the panel
+    fetch(backendBaseUrl + '/api/digest', { signal: AbortSignal.timeout(8000) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.ready) {
+          dailyDigest   = { te: data.te || null, en: data.en || null };
+          todaySections = Array.isArray(data.sections) ? data.sections : [];
+          _injectDigest(dailyDigest[currentLang]);       // inject digest if panel is already open
+          _injectSectionChips(todaySections);            // update chips with real sections
+        }
+      })
+      .catch(() => {});  // digest unavailable — loading slot remains; user can ask directly
 
     // Load content
     if (window.NewsAI && window.NewsAI.loadContent) {

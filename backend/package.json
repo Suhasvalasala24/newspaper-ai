@@ -4,10 +4,14 @@
   "description": "NewsAI backend — PDF ingestion and web scraping endpoints",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev":   "node --watch server.js"
+    "start":        "node server.js",
+    "dev":          "node --watch server.js",
+    "build:widget": "npx esbuild ../widget/newsai-widget.js --bundle=false --minify --outfile=../widget/newsai-widget.min.js",
+    "build:ext":    "npx esbuild ../extension/widget/newsai-widget.js --bundle=false --minify --outfile=../extension/widget/newsai-widget.min.js",
+    "sync:ext":     "cd .. && bash sync-extension.sh"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
     "cheerio":    "^1.0.0",
     "cors":       "^2.8.5",
     "dotenv":     "^16.4.5",

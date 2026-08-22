@@ -17,9 +17,7 @@
     "type": "rss",
     "url": "https://www.eenadu.net/rss.xml"
   },
-  "groqApiKey": "REPLACE_WITH_GROQ_KEY",
-  "llmProvider": "groq",
-  "llmModel": "llama-3.1-8b-instant",
+  "_note": "API keys belong in backend/.env (GEMINI_API_KEY, SARVAM_API_KEY). Never put real keys here — this config ships to the browser.",
   "backendUrl": "REPLACE_WITH_BACKEND_URL",
   "sectionUrls": {
     "National": "https://www.eenadu.net/national",

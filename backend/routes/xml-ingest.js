@@ -468,4 +468,25 @@ function pollStatus(req, res) {
   });
 }
 
-module.exports = { ingestXML, pollXML, pollStatus };
+/**
+ * Programmatic helper — fetch, parse, and ingest from a URL without needing an
+ * Express req/res pair. Used by server.js for background 30-min auto-refresh.
+ * Returns { parsed, ingested } or throws on network/parse failure.
+ */
+async function pollFromUrl(url) {
+  if (!isSafeUrl(url)) throw new Error(`Blocked unsafe URL: ${url}`);
+  const xml   = await fetchXML(url);
+  const items = parseXML(xml);
+  const n     = ingestArticles(items);
+  lastPollTime  = new Date().toISOString();
+  lastPollCount = n;
+  if (n > 0) {
+    triggerAutoEmbed();
+    triggerCacheRefresh();
+    triggerChipsBuild();
+    triggerDigestGeneration();
+  }
+  return { parsed: items.length, ingested: n };
+}
+
+module.exports = { ingestXML, pollXML, pollStatus, pollFromUrl };

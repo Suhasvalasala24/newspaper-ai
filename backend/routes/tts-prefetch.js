@@ -18,11 +18,21 @@
  */
 
 const store = require('../store/articleStore');
-const { callSarvam, detectPace, SPEAKER_MAP, LANG_CODE_MAP } = require('./tts');
+const { callSarvam, detectPace, preprocessForTTS, SPEAKER_MAP, LANG_CODE_MAP } = require('./tts');
 
 // In-memory cache: articleId → { base64: string, mime: string }
-const audioCache    = new Map();
+// Capped at MAX_AUDIO_CACHE entries with LRU eviction to prevent OOM on long runs.
+// 500 entries × ~250 KB average (500-char WAV base64) ≈ 125 MB worst-case.
+// In practice entries are smaller and articles reset at midnight.
+const audioCache      = new Map();
+const MAX_AUDIO_CACHE = 500;
 let   prefetchRunning = false;
+
+// LRU eviction helper — removes the oldest (first inserted) entry
+function evictOldestAudio() {
+  const firstKey = audioCache.keys().next().value;
+  if (firstKey !== undefined) audioCache.delete(firstKey);
+}
 
 // ── Simple Telugu script detector ─────────────────────────────────────────────
 function detectLang(text) {
@@ -33,30 +43,30 @@ function detectLang(text) {
 async function generateAudio(text, lang) {
   const speaker    = SPEAKER_MAP[lang]     || SPEAKER_MAP.te;
   const targetLang = LANG_CODE_MAP[lang]   || 'te-IN';
-  const snippet    = text.slice(0, 500);   // cap at 500 chars for fast prefetch
+  // Expand abbreviations (IPL→ఐపీఎల్, CM→ముఖ్యమంత్రి) before chunking so Sarvam
+  // hears the full form, not spelled-out letters. Same step used by /api/tts.
+  const processed  = preprocessForTTS(text.slice(0, 600), targetLang);
+  const snippet    = processed.slice(0, 500);   // cap at 500 chars for fast prefetch
   const pace       = detectPace(snippet);
 
   const wavBuf = await callSarvam(snippet, targetLang, speaker, pace);
   return wavBuf.toString('base64');        // store as base64 to keep cache uniform
 }
 
-// ── POST /api/tts/prefetch ────────────────────────────────────────────────────
-// Fire-and-forget: responds immediately, generates audio in background.
-async function prefetchTTS(req, res) {
+// ── Internal: generate audio for all uncached articles ───────────────────────
+/**
+ * Does the actual background TTS prefetch work — no req/res needed.
+ * Can be called directly by server.js after a scrape, or by prefetchTTS().
+ * Uses prefetchRunning guard so concurrent calls are no-ops (not queued).
+ */
+async function runPrefetchBackground() {
+  if (prefetchRunning) return;
+  prefetchRunning = true;  // set synchronously before any await
+
   const allArticles = typeof store.getAllArticles === 'function'
     ? store.getAllArticles()
     : [];
   const pending = allArticles.filter(a => !audioCache.has(a.id));
-
-  res.json({
-    message: `TTS prefetch started for ${pending.length} articles`,
-    pending:  pending.length,
-    cached:   audioCache.size,
-    total:    allArticles.length,
-  });
-
-  if (prefetchRunning) return;
-  prefetchRunning = true;  // set synchronously before any await
 
   let generated = 0;
   try {
@@ -66,6 +76,7 @@ async function prefetchTTS(req, res) {
       const lang = a.language || detectLang(a.title || a.headline || '');
       try {
         const base64 = await generateAudio(text, lang);
+        if (audioCache.size >= MAX_AUDIO_CACHE) evictOldestAudio();
         audioCache.set(a.id, { base64, mime: 'audio/wav' });
         generated++;
       } catch (err) {
@@ -75,10 +86,22 @@ async function prefetchTTS(req, res) {
       // Small delay between articles to avoid hammering Sarvam rate limits
       await new Promise(r => setTimeout(r, 300));
     }
-    console.log(`[NewsAI TTS Prefetch] Done: ${generated}/${pending.length} articles cached`);
+    if (pending.length > 0) {
+      console.log(`[NewsAI TTS Prefetch] Done: ${generated}/${pending.length} articles cached`);
+    }
   } finally {
     prefetchRunning = false;  // always release, even on unexpected throws
   }
+}
+
+// ── POST /api/tts/prefetch ────────────────────────────────────────────────────
+// Fire-and-forget: responds immediately, runs background in runPrefetchBackground().
+// DISABLED: Sarvam free credits exhausted — returns 503 until credits replenished.
+async function prefetchTTS(req, res) {
+  return res.status(503).json({
+    message: 'TTS prefetch disabled: Sarvam credits exhausted. Re-enable when replenished.',
+    cached:  audioCache.size,
+  });
 }
 
 // ── GET /api/tts/cache/status ─────────────────────────────────────────────────
@@ -127,4 +150,4 @@ function clearAudioCache() {
   console.log('[NewsAI TTS Prefetch] Audio cache cleared for new edition');
 }
 
-module.exports = { prefetchTTS, serveCache, cacheStatus, audioCache, clearAudioCache };
+module.exports = { prefetchTTS, serveCache, cacheStatus, audioCache, clearAudioCache, runPrefetchBackground };

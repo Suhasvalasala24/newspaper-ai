@@ -2,6 +2,7 @@
 
 const store         = require('../store/articleStore');
 const { embedText } = require('./embed');
+const { recordQuery, getContextHint } = require('./user-context');
 
 // ── Query response cache (1-hour TTL) ────────────────────────────────────────
 // Caches the full query result keyed by question + topN so identical concurrent
@@ -140,6 +141,11 @@ async function queryArticles(req, res) {
     return res.status(400).json({ error: 'question is required' });
   }
 
+  // ── Per-user prompt context memory ────────────────────────────────────────
+  // Track this session's interests so getContextHint() can bias later answers.
+  const { sessionId } = req.body;
+  recordQuery(sessionId, question);
+
   const allStats = store.getStats();
 
   if (allStats.total === 0) {
@@ -156,7 +162,10 @@ async function queryArticles(req, res) {
   const cached   = cacheGet(cacheKey);
   if (cached) {
     console.log(`[NewsAI Query] CACHE HIT "${question.slice(0, 50)}"`);
-    return res.json({ ...cached, cached: true });
+    // Per-user hint is NOT cached (cache is shared across users) — append per response.
+    const hint   = getContextHint(sessionId);
+    const ctxOut = hint && cached.context ? `${cached.context}\n\n${hint}` : cached.context;
+    return res.json({ ...cached, context: ctxOut, cached: true });
   }
 
   // ── Phase 1: Keyword search ────────────────────────────────────────────────
@@ -218,25 +227,33 @@ async function queryArticles(req, res) {
   const date  = new Date().toLocaleDateString('en-IN', { weekday: 'long', month: 'long', day: 'numeric' });
   let context = `Today's articles | ${date} | ${results.length} relevant articles\n\n`;
 
+  // Track which articles actually made it into context — only those should appear as
+  // "Read More" links in the widget. Showing links for articles the AI never saw
+  // creates a mismatch where the AI can't answer questions about those articles.
+  const articlesInContext = [];
+
   for (const a of results) {
-    context += `Headline: ${a.title}\n`;
     const body = dedupContent(a.content || '');  // collapse CMS-introduced repetitions
-    if (body && body.length >= 150) {
-      // Pre-extract first sentence in code — LLM copies it, never generates it.
-      const summary = extractFirstSentence(body);
-      if (summary) context += `Summary: ${summary}\n`;
-      context += `Body: ${body}\n`;
-    } else {
-      context += `Body: [HEADLINE ONLY — DO NOT ADD ANY DESCRIPTION]\n`;
-    }
+    // Skip articles with no real body — a headline alone adds no grounding value
+    // and only tempts the model to invent a description around it.
+    if (!body || body.length < 150) continue;
+    articlesInContext.push(a);
+    context += `Headline: ${a.title}\n`;
+    // Pre-extract first sentence in code — LLM copies it, never generates it.
+    const summary = extractFirstSentence(body);
+    if (summary) context += `Summary: ${summary}\n`;
+    // Cap body at 350 chars — the LLM only ever cites the first sentence anyway;
+    // the full body is in the Gemini context cache for deeper detail queries.
+    context += `Body: ${body.slice(0, 350)}${body.length > 350 ? '…' : ''}\n`;
     if (a.url) context += `URL: ${a.url}\n`;
     context += '\n';
   }
 
-  // Deduplicate by URL so the widget never shows the same article link twice
-  // (can occur when Phase 1 + Phase 2 scrapes both ingest the same story)
+  // Deduplicate by URL so the widget never shows the same article link twice.
+  // Use articlesInContext (not the full results) — Read More links should only point
+  // to articles whose content the AI actually received and can answer questions about.
   const seenUrls  = new Set();
-  const dedupedResults = results.filter(a => {
+  const dedupedResults = articlesInContext.filter(a => {
     if (!a.url) return true;          // no URL — always include
     if (seenUrls.has(a.url)) return false;
     seenUrls.add(a.url);
@@ -244,8 +261,12 @@ async function queryArticles(req, res) {
   });
 
   const result = { articles: dedupedResults, context, stats: allStats, method };
-  cacheSet(cacheKey, result);  // cache for 1 hour
-  res.json(result);
+  cacheSet(cacheKey, result);  // cache the base result for 1 hour (no per-user hint)
+
+  // Append the per-user context hint to THIS response only — never to the shared cache.
+  const hint        = getContextHint(sessionId);
+  const responseCtx = hint ? `${context}\n\n${hint}` : context;
+  res.json({ ...result, context: responseCtx });
 }
 
 // Called at IST midnight reset to evict yesterday's cached answers

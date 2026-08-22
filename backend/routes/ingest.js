@@ -69,9 +69,13 @@ function ingestArticle(req, res) {
     // Override section with URL-derived label when available — more reliable
     // than what the scraper/RSS provides (Sakshi often tags Telangana articles as General)
     const resolvedSection = normalizeSectionFromUrl(url, section);
+    const totalBefore = store.getStats().total;
     const article = store.addArticle({ title, section: resolvedSection, tags, content, url, language });
     const stats   = store.getStats();
-    console.log(`[NewsAI Ingest] ✅ Added: "${title.slice(0, 60)}" [${resolvedSection}] | Total: ${stats.total}`);
+    // Only log new articles — suppresses the wall of duplicate "Added" lines during re-polls
+    if (stats.total > totalBefore) {
+      console.log(`[NewsAI Ingest] ✅ Added: "${title.slice(0, 60)}" [${resolvedSection}] | Total: ${stats.total}`);
+    }
     res.json({ success: true, article, stats });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -82,7 +86,29 @@ function ingestArticle(req, res) {
 function getToday(req, res) {
   const articles = store.getAllArticles();
   const stats    = store.getStats();
-  res.json({ articles, stats });
+  const pendingIds = new Set((store.getArticlesForEmbedding() || []).map(a => a.id));
+  // Strip the 384-float embedding vector and full body text — they are not needed by
+  // consumers of this endpoint and add ~76 KB of floats + body text per 200 articles.
+  const articlesWithFlag = articles.map(({ embedding: _emb, content: _body, ...rest }) => ({
+    ...rest,
+    hasEmbedding: !pendingIds.has(rest.id),
+  }));
+  res.json({ articles: articlesWithFlag, stats });
+}
+
+/**
+ * GET /api/articles/breaking-count — lightweight freshness check for the widget.
+ * Returns only article IDs + addedAt for articles ingested in the last 15 minutes.
+ * The widget's checkBreakingNews() polls this instead of /api/articles/today so it
+ * avoids downloading all article text on a hot 5-min polling path.
+ */
+function getBreakingCount(req, res) {
+  const FRESH_MS = 15 * 60 * 1000;   // 15-min freshness window
+  const cutoff   = Date.now() - FRESH_MS;
+  const breaking = store.getAllArticles()
+    .filter(a => a.addedAt && new Date(a.addedAt).getTime() > cutoff)
+    .map(a => ({ id: a.id, addedAt: a.addedAt, section: a.section }));
+  res.json({ count: breaking.length, articles: breaking });
 }
 
 /** DELETE /api/articles/reset — clear today's edition */
@@ -100,4 +126,4 @@ function loadSample(req, res) {
   res.json({ success: true, count, stats, articles: store.getAllArticles() });
 }
 
-module.exports = { ingestArticle, getToday, resetToday, loadSample };
+module.exports = { ingestArticle, getToday, getBreakingCount, resetToday, loadSample };

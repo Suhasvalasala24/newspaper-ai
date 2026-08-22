@@ -10,11 +10,11 @@
  * GET /api/digest → { te, en, generatedAt, ready }
  */
 
-const GEMINI_MODEL   = 'gemini-2.5-flash-lite';
+const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const DIGEST_TIMEOUT = 30000;   // 30s — digest can take a moment with 200 articles
 
 // ── Module state ─────────────────────────────────────────────────────────────
-let digestCache = { te: null, en: null, generatedAt: null };
+let digestCache = { te: null, en: null, generatedAt: null, sections: [] };
 let digestRunning = false;
 
 // ── Call Gemini for one language ──────────────────────────────────────────────
@@ -104,7 +104,8 @@ async function generateDigest(articles) {
 
   digestRunning = true;
   try {
-    const ctx = buildDigestContext(articles);
+    const ctx      = buildDigestContext(articles);
+    const sections = [...new Set(articles.map(a => a.section).filter(Boolean))];
     console.log(`[NewsAI Digest] Generating digest from ${articles.length} articles...`);
 
     const [te, en] = await Promise.all([
@@ -112,7 +113,7 @@ async function generateDigest(articles) {
       callGeminiDigest(ctx, 'en').catch(e => { console.warn('[NewsAI Digest] English failed:', e.message); return null; }),
     ]);
 
-    digestCache = { te, en, generatedAt: new Date().toISOString() };
+    digestCache = { te, en, generatedAt: new Date().toISOString(), sections };
     console.log(`[NewsAI Digest] ✅ Done — te:${!!te} en:${!!en}`);
   } catch (err) {
     console.warn('[NewsAI Digest] Generation failed:', err.message);
@@ -129,12 +130,13 @@ function getDigest(req, res) {
     en:          digestCache.en,
     generatedAt: digestCache.generatedAt,
     ready:       !!(digestCache.te || digestCache.en),
+    sections:    digestCache.sections || [],
   });
 }
 
 // ── Clear on midnight reset ───────────────────────────────────────────────────
 function clearDigest() {
-  digestCache  = { te: null, en: null, generatedAt: null };
+  digestCache  = { te: null, en: null, generatedAt: null, sections: [] };
   digestRunning = false;
 }
 

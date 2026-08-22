@@ -22,6 +22,7 @@
  */
 
 const briefing = require('../store/briefingStore');
+const { recordQuery, getContextHint } = require('./user-context');
 
 // ── Section trigger map ────────────────────────────────────────────────────
 // Maps section names to trigger keywords (English + Telugu).
@@ -136,7 +137,7 @@ function buildContext(articles, section, date) {
 // ── Route handler ──────────────────────────────────────────────────────────
 
 async function chat(req, res) {
-  const { question } = req.body;
+  const { question, sessionId } = req.body;
   // typeof check: a non-string (number/object) would make .trim() throw inside an
   // async handler — Express 4 doesn't catch that, and the unhandled rejection
   // kills the Node process (a one-request DoS since CORS is open).
@@ -166,7 +167,14 @@ async function chat(req, res) {
     : allArticles;
 
   const stats = briefing.getStats(allArticles);
-  const ctx   = buildContext(filtered, section, stats.date);
+  let   ctx   = buildContext(filtered, section, stats.date);
+
+  // ── Per-user prompt context memory ────────────────────────────────────────
+  // Track this session's interests, then append a context hint the widget can
+  // inject into the system prompt so answers lean toward the user's preferences.
+  recordQuery(sessionId, question, section);
+  const contextHint = getContextHint(sessionId);
+  if (contextHint) ctx += `\n\n${contextHint}`;
 
   console.log(`[Chat] "${question.slice(0, 60)}" → section="${section || 'all'}" | ${filtered.length}/${allArticles.length} articles | withBody=${filtered.filter(a=>(a.body||'').length>80).length}`);
 

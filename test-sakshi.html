@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="te">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>సాక్షి — AI Assistant Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Noto Sans Telugu', Georgia, serif;
+      background: #f0ede8;
+      color: #1a1a1a;
+    }
+
+    /* ── Realistic Sakshi-style newspaper header ── */
+    header {
+      background: #C0392B;
+      color: #fff;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    header .logo {
+      font-size: 26px;
+      font-weight: 900;
+      letter-spacing: -0.5px;
+    }
+    header nav a {
+      color: rgba(255,255,255,0.85);
+      text-decoration: none;
+      font-size: 13px;
+      margin-left: 18px;
+    }
+    header nav a:hover { color: #fff; }
+
+    .date-bar {
+      background: #1a1a1a;
+      color: #ccc;
+      font-size: 11px;
+      text-align: center;
+      padding: 4px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Section nav ── */
+    .section-nav {
+      background: #fff;
+      border-bottom: 2px solid #C0392B;
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .section-nav::-webkit-scrollbar { display: none; }
+    .section-nav a {
+      text-decoration: none;
+      color: #333;
+      font-size: 13px;
+      padding: 10px 16px;
+      white-space: nowrap;
+      border-right: 1px solid #eee;
+    }
+    .section-nav a:first-child { color: #C0392B; font-weight: 700; }
+    .section-nav a:hover { background: #fff5f5; color: #C0392B; }
+
+    /* ── Main content ── */
+    main {
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 24px;
+    }
+
+    /* ── Article cards ── */
+    .headline-card {
+      background: #fff;
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      margin-bottom: 16px;
+    }
+    .headline-card img {
+      width: 100%;
+      height: 200px;
+      object-fit: cover;
+      background: #ddd;
+    }
+    .headline-card .card-body { padding: 14px 16px 16px; }
+    .headline-card .tag {
+      font-size: 10px;
+      font-weight: 700;
+      color: #C0392B;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+    .headline-card h2 {
+      font-size: 19px;
+      line-height: 1.4;
+      color: #111;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    .headline-card p {
+      font-size: 13px;
+      color: #555;
+      line-height: 1.6;
+    }
+    .headline-card .meta {
+      font-size: 11px;
+      color: #999;
+      margin-top: 10px;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar h3 {
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #C0392B;
+      border-bottom: 2px solid #C0392B;
+      padding-bottom: 6px;
+      margin-bottom: 12px;
+    }
+    .sidebar-item {
+      background: #fff;
+      border-radius: 4px;
+      padding: 12px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    }
+    .sidebar-item h4 { font-size: 14px; line-height: 1.4; color: #111; }
+    .sidebar-item .meta { font-size: 11px; color: #999; margin-top: 4px; }
+
+    /* ── AI badge callout ── */
+    .ai-callout {
+      background: linear-gradient(135deg, #C0392B 0%, #922B21 100%);
+      color: #fff;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .ai-callout h3 { font-size: 15px; margin-bottom: 4px; }
+    .ai-callout p { font-size: 12px; opacity: 0.85; }
+
+    /* ── Embed snippet box (for Sakshi's web team) ── */
+    .embed-info {
+      background: #1a1a1a;
+      color: #a8d8a8;
+      border-radius: 6px;
+      padding: 16px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.8;
+      margin: 24px 16px;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .embed-info .comment { color: #666; }
+
+    @media (max-width: 700px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Realistic Sakshi newspaper header -->
+<header>
+  <div class="logo">సాక్షి</div>
+  <nav>
+    <a href="#">తెలంగాణ</a>
+    <a href="#">ఆంధ్రప్రదేశ్</a>
+    <a href="#">జాతీయం</a>
+    <a href="#">క్రీడలు</a>
+    <a href="#">సినిమా</a>
+  </nav>
+</header>
+
+<div class="date-bar">సోమవారం, ఆగస్టు 18, 2026 &nbsp;|&nbsp; HYDERABAD EDITION &nbsp;|&nbsp; ePaper | E-TV</div>
+
+<div class="section-nav">
+  <a href="#">హోమ్</a>
+  <a href="#">తెలంగాణ</a>
+  <a href="#">ఆంధ్రప్రదేశ్</a>
+  <a href="#">జాతీయం</a>
+  <a href="#">అంతర్జాతీయం</a>
+  <a href="#">క్రీడలు</a>
+  <a href="#">సినిమా</a>
+  <a href="#">వ్యాపారం</a>
+  <a href="#">నేరాలు</a>
+</div>
+
+<main>
+  <div class="content">
+    <div class="headline-card">
+      <div style="background:#c8c8c8;height:200px;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">[ వార్త చిత్రం ]</div>
+      <div class="card-body">
+        <div class="tag">తెలంగాణ</div>
+        <h2>రాష్ట్రంలో భారీ వర్షాలు — అన్ని జిల్లాలకు అలర్ట్</h2>
+        <p>తెలంగాణ రాష్ట్రంలో రాబోయే 48 గంటల్లో భారీ వర్షాలు కురుస్తాయని వాతావరణ శాఖ హెచ్చరించింది. అన్ని జిల్లా కలెక్టర్లను అప్రమత్తంగా ఉండాలని ముఖ్యమంత్రి ఆదేశించారు.</p>
+        <div class="meta">సాక్షి న్యూస్ డెస్క్ &nbsp;·&nbsp; 2 గంటల క్రితం</div>
+      </div>
+    </div>
+
+    <div class="headline-card">
+      <div style="background:#d8d0c8;height:160px;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">[ వార్త చిత్రం ]</div>
+      <div class="card-body">
+        <div class="tag">క్రీడలు</div>
+        <h2>భారత్ vs శ్రీలంక: తొలి టెస్ట్‌లో భారత్ భారీ విజయం</h2>
+        <p>హైదరాబాద్ రాజీవ్ గాంధీ స్టేడియంలో జరిగిన మొదటి టెస్ట్ మ్యాచ్‌లో భారత్ ఇన్నింగ్స్ మరియు 75 పరుగుల తేడాతో విజయం సాధించింది.</p>
+        <div class="meta">స్పోర్ట్స్ డెస్క్ &nbsp;·&nbsp; 4 గంటల క్రితం</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <!-- AI callout draws attention to the new feature -->
+    <div class="ai-callout">
+      <h3>🤖 సాక్షి AI వచ్చింది!</h3>
+      <p>ఈ రోజు వార్తల గురించి ఏదైనా అడగండి — తెలుగులో మాట్లాడండి</p>
+    </div>
+
+    <h3>తాజా వార్తలు</h3>
+
+    <div class="sidebar-item">
+      <h4>AP లో నూతన పారిశ్రామిక విధానం ప్రకటన</h4>
+      <div class="meta">వ్యాపారం &nbsp;·&nbsp; 1 గంట క్రితం</div>
+    </div>
+    <div class="sidebar-item">
+      <h4>టాలీవుడ్ స్టార్ హీరో కొత్త చిత్రం అనౌన్స్‌మెంట్</h4>
+      <div class="meta">సినిమా &nbsp;·&nbsp; 3 గంటల క్రితం</div>
+    </div>
+    <div class="sidebar-item">
+      <h4>హైదరాబాద్ ట్రాఫిక్ నియంత్రణకు నూతన చర్యలు</h4>
+      <div class="meta">హైదరాబాద్ &nbsp;·&nbsp; 5 గంటల క్రితం</div>
+    </div>
+  </div>
+</main>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     EMBED SNIPPET — Sakshi's web team pastes these two lines before </body>
+     ══════════════════════════════════════════════════════════════════════ -->
+<div class="embed-info"><span class="comment">&lt;!-- Sakshi AI Widget — paste before &lt;/body&gt; --&gt;</span>
+&lt;script&gt;
+  window.NewsAIConfig = { configUrl: 'https://ai-api.sakshi.com/configs/sakshi.json' };
+&lt;/script&gt;
+&lt;script src="https://ai-api.sakshi.com/widget/newsai-widget.js" async&gt;&lt;/script&gt;</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     ACTUAL WIDGET LOAD (local dev — change URLs for production)
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+  window.NewsAIConfig = {
+    config: {
+      brand: {
+        name:             'సాక్షి AI',
+        shortName:        'సా',
+        primaryColor:     '#C0392B',
+        logoUrl:          'https://www.sakshi.com/themes/custom/sakshi/assets/images/logo.png',
+        welcomeMessage:   'నమస్కారం! నేను సాక్షి AI. ఈ రోజు వార్తలు, సినిమా, క్రీడలు అన్నీ అడగండి!',
+        welcomeMessageEn: "Hello! I'm Sakshi AI. Ask me anything about today's edition!",
+      },
+      languages:       ['te', 'en'],
+      defaultLanguage: 'te',
+      sections: [
+        'తెలంగాణ', 'ఆంధ్రప్రదేశ్', 'జాతీయం', 'అంతర్జాతీయం',
+        'క్రీడలు', 'సినిమా', 'వ్యాపారం', 'రాజకీయాలు', 'నేరాలు',
+      ],
+      backendUrl: 'http://localhost:3001',  // change to https://ai-api.sakshi.com in prod
+      position:   'bottom-right',
+    },
+  };
+</script>
+<script src="widget/newsai-config-loader.js"></script>
+<script src="widget/newsai-widget.js" async></script>
+
+</body>
+</html>

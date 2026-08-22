@@ -34,8 +34,36 @@
     "url": "https://www.sakshi.com/rss.xml",
     "pollIntervalMinutes": 30
   },
-  "backendUrl": "http://localhost:3001",
+  "backendUrl": "https://ai-api.sakshi.com",
   "position": "bottom-right",
+  "ttsVoice": "roopa",
+  "_ttsVoiceOptions": "Telugu female: roopa (default), kavya, priya, suhani, tanya, shruti, ishita, pooja | English female: neha (default), priya, simran",
+  "scraper": {
+    "sitemapUrl": "https://www.sakshi.com/news-sitemap.xml",
+    "sectionPages": [
+      { "url": "https://www.sakshi.com/", "section": null },
+      { "url": "https://www.sakshi.com/sports", "section": "Sports" },
+      { "url": "https://www.sakshi.com/cinema", "section": "Cinema" },
+      { "url": "https://www.sakshi.com/politics", "section": "Politics" },
+      { "url": "https://www.sakshi.com/national", "section": "National" },
+      { "url": "https://www.sakshi.com/business", "section": "Business" },
+      { "url": "https://www.sakshi.com/tags/telangana", "section": "Telangana" },
+      { "url": "https://www.sakshi.com/tags/andhra-pradesh", "section": "Andhra Pradesh" },
+      { "url": "https://www.sakshi.com/crime", "section": "Crime & Police" },
+      { "url": "https://www.sakshi.com/international", "section": "International" }
+    ],
+    "rssFeeds": [
+      { "url": "https://www.sakshi.com/rss.xml", "section": null },
+      { "url": "https://www.sakshi.com/rss/sports", "section": "Sports" },
+      { "url": "https://www.sakshi.com/rss/cinema", "section": "Cinema" },
+      { "url": "https://www.sakshi.com/rss/telangana", "section": "Telangana" },
+      { "url": "https://www.sakshi.com/rss/andhra-pradesh", "section": "Andhra Pradesh" },
+      { "url": "https://www.sakshi.com/rss/national", "section": "National" },
+      { "url": "https://www.sakshi.com/rss/international", "section": "International" },
+      { "url": "https://www.sakshi.com/rss/business", "section": "Business" },
+      { "url": "https://www.sakshi.com/rss/politics", "section": "Politics" }
+    ]
+  },
   "_notes": {
     "cms": "Drupal 10",
     "articleUrlPattern": "https://www.sakshi.com/telugu-news/{section}/{english-slug}-{drupal-node-id}",

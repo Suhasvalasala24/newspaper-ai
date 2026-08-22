@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sakshi NewsAI — Content Portal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root {
     --bg:        #0D1B2A;
@@ -163,6 +164,47 @@
   .ready-banner .text strong { display: block; font-size: 14px; color: var(--green); }
   .ready-banner .text span { font-size: 12px; color: #7fc99a; }
 
+  /* Scrape panel */
+  .scrape-panel {
+    background: linear-gradient(135deg, #1a0a2e, #0a1f3a);
+    border: 1px solid #4a2a8a; border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+  }
+  .scrape-panel .panel-title { color: #a78bfa; margin-bottom: 14px; }
+  .scrape-status {
+    font-size: 12px; margin-top: 10px; padding: 8px 12px; border-radius: 6px;
+    background: var(--surface2); border: 1px solid var(--border); display: none;
+  }
+  .scrape-status.show  { display: block; }
+  .scrape-status.ok    { border-color: var(--green); color: #4ade80; }
+  .scrape-status.err   { border-color: var(--red);   color: #f87171; }
+  .scrape-status.busy  { border-color: #a78bfa;      color: #a78bfa; }
+  .btn-purple { background: #7c3aed; color: #fff; }
+  .btn-purple:hover { background: #6d28d9; }
+
+  /* XML Ingest panel */
+  .xml-panel {
+    background: linear-gradient(135deg, #0e2a1a, #0a1f2e);
+    border: 1px solid #2a6a4a; border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+  }
+  .xml-panel .panel-title { color: #4ade80; margin-bottom: 14px; }
+  .xml-status {
+    font-size: 12px; margin-top: 10px; padding: 8px 12px; border-radius: 6px;
+    background: var(--surface2); border: 1px solid var(--border); display: none;
+  }
+  .xml-status.show { display: block; }
+  .xml-status.ok   { border-color: var(--green); color: #4ade80; }
+  .xml-status.err  { border-color: var(--red);   color: #f87171; }
+  .xml-status.busy { border-color: var(--accent); color: var(--accent); }
+
+  /* Auto-refresh badge */
+  .auto-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; padding: 3px 9px; border-radius: 12px;
+    background: #1a4d2a; border: 1px solid var(--green); color: #4ade80;
+    margin-left: 8px;
+  }
+  .auto-badge.off { background: #2a1a0a; border-color: #a05a20; color: #f5a623; }
+
   /* Section colors */
   .sec-Sports     { background: #1a4fa0 !important; }
   .sec-Telangana  { background: #7d3a0a !important; }
@@ -174,6 +216,44 @@
   .sec-Crime      { background: #5a1a1a !important; }
   .sec-AP, .sec-AndhraPradesh { background: #3a4a0a !important; }
   .sec-International { background: #1a3a5a !important; }
+
+  /* ── Analytics Section ── */
+  .analytics-section {
+    background: var(--surface);
+    border-top: 2px solid var(--border);
+    padding: 24px 32px;
+  }
+  .analytics-top {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .analytics-kpis {
+    display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .kpi-pill {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px; text-align: center; min-width: 100px;
+  }
+  .kpi-pill .kv { font-size: 22px; font-weight: 800; color: var(--accent); }
+  .kpi-pill .kl { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-top: 2px; }
+  .analytics-charts {
+    display: grid; grid-template-columns: 1fr 220px 1fr; gap: 20px;
+  }
+  .chart-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px;
+  }
+  .chart-card-title {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--accent2); margin-bottom: 12px;
+  }
+  #analyticsEmpty {
+    color: var(--text2); font-size: 13px; text-align: center; padding: 20px 0;
+    display: none;
+  }
+  @media (max-width: 900px) {
+    .analytics-charts { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -207,6 +287,71 @@
 
   <!-- Left: Upload Form -->
   <div class="form-panel">
+    <!-- ── Web Scrape — primary action ── -->
+    <div class="scrape-panel">
+      <div class="panel-title">🌐 Scrape Sakshi.com Live</div>
+      <p style="font-size:12px;color:#c4b5fd;margin-bottom:12px;line-height:1.5">
+        Fetches today's articles directly from sakshi.com across 13 section pages — no extension needed.
+      </p>
+      <button class="btn btn-purple" onclick="scrapeSakshiNow()" id="scrapeBtn">
+        🔄 Scrape Sakshi.com Now
+      </button>
+      <div id="scrapeStatus" class="scrape-status"></div>
+    </div>
+
+    <!-- ── XML / URL Auto-Ingest ── -->
+    <div class="xml-panel">
+      <div class="panel-title" style="margin-bottom:12px">
+        📡 Fetch from Sakshi XML Feed
+        <span id="autoRefreshBadge" class="auto-badge off">⏸ Manual</span>
+      </div>
+
+      <div class="form-group" style="margin-bottom:10px">
+        <label>XML Feed URL</label>
+        <input type="url" id="xmlUrl"
+          placeholder="https://www.sakshi.com/rss or paste XML feed URL..."
+          style="font-size:12px" />
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-green btn-sm" style="flex:1" onclick="fetchXmlNow()">
+          ⚡ Fetch All Articles Now
+        </button>
+        <button class="btn btn-secondary btn-sm" style="flex:1" onclick="pasteXmlDirect()">
+          📋 Paste Raw XML
+        </button>
+      </div>
+
+      <div id="xmlStatus" class="xml-status"></div>
+
+      <details style="margin-top:10px">
+        <summary style="font-size:11px;color:var(--text2);cursor:pointer">
+          ⚙️ Auto-refresh every 30 min (requires backend .env)
+        </summary>
+        <div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.6">
+          Add to <code style="background:var(--surface2);padding:2px 5px;border-radius:4px">backend/.env</code>:<br>
+          <code style="background:var(--surface2);padding:4px 8px;border-radius:4px;display:block;margin-top:4px">
+            XML_POLL_URL=https://www.sakshi.com/rss
+          </code>
+          Then restart the backend — articles auto-ingest every 30 minutes.
+        </div>
+      </details>
+    </div>
+
+    <!-- ── Paste Raw XML modal area ── -->
+    <div id="xmlPasteArea" style="display:none;margin-bottom:16px">
+      <div class="form-group">
+        <label>Paste XML Content</label>
+        <textarea id="xmlPasteContent" style="min-height:140px;font-size:11px;font-family:monospace"
+          placeholder="Paste Sakshi XML feed content here..."></textarea>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm" style="flex:1" onclick="ingestPastedXml()">⚡ Ingest XML</button>
+        <button class="btn btn-secondary btn-sm" style="flex:1" onclick="document.getElementById('xmlPasteArea').style.display='none'">✕ Cancel</button>
+      </div>
+    </div>
+
+    <hr class="divider" />
     <div class="panel-title">➕ Add Article</div>
 
     <div class="form-group">
@@ -291,6 +436,51 @@
       🗑️ Clear All — Start New Edition
     </button>
     <div id="translateStatus" style="font-size:12px;color:var(--text2);margin-top:8px;display:none"></div>
+
+    <hr class="divider" />
+    <div class="panel-title">🛡️ Admin Panel</div>
+
+    <div class="form-group">
+      <label>Admin Token</label>
+      <input type="password" id="adminToken" placeholder="x-admin-token from backend/.env" oninput="loadAdminData()" />
+    </div>
+
+    <!-- Gemini Cache Status -->
+    <div style="background:#0a1a2e;border:1px solid #1e3a5f;border-radius:8px;padding:14px;margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#4a90d9;margin-bottom:10px;">⚡ Gemini Context Cache</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span id="cacheDot" style="width:9px;height:9px;border-radius:50%;background:#555;flex-shrink:0;display:inline-block;"></span>
+        <span id="cacheStatusText" style="font-size:12px;color:var(--text2);">Checking…</span>
+      </div>
+      <div id="cacheExpiry" style="font-size:11px;color:var(--text2);margin-bottom:8px;"></div>
+      <button class="btn btn-secondary btn-sm" onclick="loadCacheStatus()" style="width:auto;">↺ Check status</button>
+    </div>
+
+    <!-- Security Stats -->
+    <div style="background:#1a0d0d;border:1px solid #5a1a1a;border-radius:8px;padding:14px;margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#e74c3c;margin-bottom:10px;">🛡️ Rate Limiter Stats</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;">
+        <div><div id="statBlocked" style="font-size:20px;font-weight:800;color:#f87171;">—</div><div style="font-size:10px;color:var(--text2);">Blocked IPs</div></div>
+        <div><div id="statTracked" style="font-size:20px;font-weight:800;color:var(--text);">—</div><div style="font-size:10px;color:var(--text2);">Tracked IPs</div></div>
+        <div><div id="statRpm" style="font-size:20px;font-weight:800;color:var(--accent2);">—</div><div style="font-size:10px;color:var(--text2);">Req/min</div></div>
+      </div>
+    </div>
+
+    <!-- Block / Unblock IP -->
+    <div style="background:#1a0d0d;border:1px solid #5a1a1a;border-radius:8px;padding:14px;margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#e74c3c;margin-bottom:10px;">🚫 Block / Unblock IP</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+        <input type="text" id="blockIpInput" placeholder="IP address" style="flex:1;min-width:100px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;" />
+        <input type="number" id="blockHoursInput" value="24" min="1" max="720" placeholder="hrs" style="width:58px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 8px;font-size:12px;" />
+        <button class="btn btn-danger btn-sm" onclick="doBlockIp()" style="width:auto;">Block</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <input type="text" id="unblockIpInput" placeholder="IP to unblock" style="flex:1;min-width:100px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:7px 10px;font-size:12px;" />
+        <button class="btn btn-green btn-sm" onclick="doUnblockIp()" style="width:auto;">Unblock</button>
+      </div>
+      <div id="blockLog" style="font-size:11px;color:#4ade80;margin-top:6px;display:none;"></div>
+    </div>
+
   </div>
 
   <!-- Right: Article List -->
@@ -317,11 +507,151 @@
   </div>
 </div>
 
+<!-- Analytics Section — full width, below main grid -->
+<div class="analytics-section">
+  <div class="analytics-top">
+    <div class="panel-title" style="margin-bottom:0">📊 Today's Analytics</div>
+    <button class="btn btn-secondary btn-sm" onclick="loadAnalytics()" style="width:auto">↺ Refresh</button>
+  </div>
+  <div class="analytics-kpis">
+    <div class="kpi-pill"><div class="kv" id="aKpiQueries">—</div><div class="kl">Queries</div></div>
+    <div class="kpi-pill"><div class="kv" id="aKpiOpens">—</div><div class="kl">Widget Opens</div></div>
+    <div class="kpi-pill"><div class="kv" id="aKpiTts">—</div><div class="kl">TTS Plays</div></div>
+    <div class="kpi-pill"><div class="kv" id="aKpiClicks">—</div><div class="kl">Article Clicks</div></div>
+    <div class="kpi-pill"><div class="kv" id="aKpiPeak">—</div><div class="kl">Peak Hour (IST)</div></div>
+  </div>
+  <p id="analyticsEmpty">No queries recorded today yet — data will appear once readers use the widget.</p>
+  <div class="analytics-charts" id="analyticsCharts">
+    <div class="chart-card">
+      <div class="chart-card-title">🔍 Top 10 Queries</div>
+      <canvas id="chartQueries"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">🌐 Language Split</div>
+      <canvas id="chartLang"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-card-title">📈 Hourly Traffic (IST)</div>
+      <canvas id="chartHourly"></canvas>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
 const API = 'http://localhost:3001';
 let activeTags = new Set();
+
+// ── Sakshi web scraper ────────────────────────────────────────────────────
+
+async function scrapeSakshiNow() {
+  const btn = document.getElementById('scrapeBtn');
+  const statusEl = document.getElementById('scrapeStatus');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Scraping…';
+  statusEl.textContent = '⏳ Fetching sakshi.com and 12 section pages in parallel…';
+  statusEl.className = 'scrape-status show busy';
+
+  try {
+    const resp = await fetch(`${API}/api/scrape-sakshi`, { method: 'POST' });
+    const data = await resp.json();
+
+    if (!resp.ok || data.error) {
+      statusEl.textContent = '❌ ' + (data.error || `HTTP ${resp.status}`);
+      statusEl.className = 'scrape-status show err';
+      return;
+    }
+
+    const sectionList = (data.sections || []).join(', ') || '—';
+    statusEl.innerHTML =
+      `✅ <strong>${data.ingested} new articles</strong> ingested ` +
+      `(${data.skipped} dupes skipped) in ${data.elapsed}<br>` +
+      `<span style="color:var(--text2)">Sections: ${sectionList}</span>`;
+    statusEl.className = 'scrape-status show ok';
+    showToast(`✅ ${data.ingested} articles scraped from Sakshi`);
+    refreshList();
+  } catch (e) {
+    statusEl.textContent = '❌ Could not reach backend — is node server.js running?';
+    statusEl.className = 'scrape-status show err';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 Scrape Sakshi.com Now';
+  }
+}
+
+// ── XML ingest helpers ─────────────────────────────────────────────────────
+
+function setXmlStatus(msg, type = 'busy') {
+  const el = document.getElementById('xmlStatus');
+  el.textContent = msg;
+  el.className = `xml-status show ${type}`;
+}
+
+async function fetchXmlNow() {
+  const url = document.getElementById('xmlUrl').value.trim();
+  if (!url) return showToast('❌ Enter an XML feed URL first', true);
+
+  setXmlStatus('⏳ Fetching XML from ' + url.slice(0, 50) + '…');
+  try {
+    const resp = await fetch(`${API}/api/poll-xml`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ url }),
+    });
+    const data = await resp.json();
+    if (data.error) { setXmlStatus('❌ ' + data.error, 'err'); return; }
+    setXmlStatus(`✅ Fetched ${data.parsed} articles — ${data.ingested} new added (${data.total} total)`, 'ok');
+    showToast(`✅ ${data.ingested} new articles from XML feed`);
+    refreshList();
+  } catch (e) {
+    setXmlStatus('❌ Could not reach backend — make sure node server.js is running', 'err');
+  }
+}
+
+function pasteXmlDirect() {
+  const area = document.getElementById('xmlPasteArea');
+  area.style.display = area.style.display === 'none' ? 'block' : 'none';
+}
+
+async function ingestPastedXml() {
+  const xml = document.getElementById('xmlPasteContent').value.trim();
+  if (!xml) return showToast('❌ Paste XML content first', true);
+  if (!xml.startsWith('<')) return showToast('❌ Content does not look like XML', true);
+
+  setXmlStatus('⏳ Parsing and ingesting XML…');
+  document.getElementById('xmlPasteArea').style.display = 'none';
+  try {
+    const resp = await fetch(`${API}/api/ingest-xml`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ xml }),
+    });
+    const data = await resp.json();
+    if (data.error) { setXmlStatus('❌ ' + data.error, 'err'); return; }
+    setXmlStatus(`✅ Parsed ${data.parsed} articles — ${data.ingested} new added (${data.total} total)`, 'ok');
+    showToast(`✅ ${data.ingested} new articles ingested`);
+    document.getElementById('xmlPasteContent').value = '';
+    refreshList();
+  } catch (e) {
+    setXmlStatus('❌ Ingest failed — check backend console', 'err');
+  }
+}
+
+// Check if auto-refresh is configured (backend would expose it via /api/poll-xml/status)
+async function checkAutoRefreshStatus() {
+  try {
+    const resp = await fetch(`${API}/api/poll-xml/status`);
+    const data = await resp.json();
+    const badge = document.getElementById('autoRefreshBadge');
+    if (data.url) {
+      badge.className = 'auto-badge';
+      badge.textContent = '🔄 Auto';
+      document.getElementById('xmlUrl').value = data.url;
+    }
+  } catch (_) {}
+}
 
 // Tag toggle
 document.querySelectorAll('.tag-btn').forEach(btn => {
@@ -492,7 +822,8 @@ async function refreshList() {
 async function resetArticles() {
   if (!confirm('Clear all articles and start a new edition?')) return;
   try {
-    await fetch(`${API}/api/articles/reset`, { method: 'DELETE' });
+    const resp = await fetch(`${API}/api/articles/reset`, { method: 'DELETE', headers: adminHeaders() });
+    if (resp.status === 401) { showToast('❌ Admin token required to clear articles', true); return; }
     updateStats({ total: 0, bySection: {} });
     renderList([]);
     showToast('🗑️ Articles cleared');
@@ -571,8 +902,199 @@ document.getElementById('dateDisplay').textContent = new Date().toLocaleDateStri
   weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
 });
 
+// ── Admin / Security helpers ─────────────────────────────────────────────────
+
+function adminHeaders() {
+  const t = (document.getElementById('adminToken')?.value || '').trim();
+  const h = { 'Content-Type': 'application/json' };
+  if (t) h['x-admin-token'] = t;
+  return h;
+}
+
+async function loadCacheStatus() {
+  const dot    = document.getElementById('cacheDot');
+  const txt    = document.getElementById('cacheStatusText');
+  const expiry = document.getElementById('cacheExpiry');
+  try {
+    const resp = await fetch(`${API}/api/gemini-cache`);
+    const data = await resp.json();
+    if (data.active && data.cacheId) {
+      dot.style.background = '#27ae60';
+      dot.style.boxShadow  = '0 0 5px #27ae60';
+      txt.textContent = 'Active — ' + data.cacheId.split('/').pop().slice(0, 22) + '…';
+      txt.style.color = '#4ade80';
+      const exp = data.expiresAt ? new Date(data.expiresAt).toLocaleTimeString() : '';
+      expiry.textContent = exp ? `Expires at ${exp}` : '';
+    } else {
+      dot.style.background = '#e74c3c';
+      dot.style.boxShadow  = 'none';
+      txt.textContent = 'No active cache — articles sent in full each request';
+      txt.style.color = '#f87171';
+      expiry.textContent = 'Trigger a scrape to upload articles to Gemini cache.';
+    }
+  } catch (err) {
+    txt.textContent = 'Could not reach cache endpoint';
+    txt.style.color = 'var(--text2)';
+  }
+}
+
+async function loadSecurityStats() {
+  const t = (document.getElementById('adminToken')?.value || '').trim();
+  if (!t) return; // don't flash error if no token yet
+  try {
+    const resp = await fetch(`${API}/api/security/stats`, { headers: adminHeaders() });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    document.getElementById('statBlocked').textContent = data.blockedIps  ?? '—';
+    document.getElementById('statTracked').textContent = data.trackedIps  ?? '—';
+    document.getElementById('statRpm').textContent     = data.globalReqPerMin ?? '—';
+  } catch (_) {}
+}
+
+function loadAdminData() {
+  loadCacheStatus();
+  loadSecurityStats();
+}
+
+async function doBlockIp() {
+  const ip    = (document.getElementById('blockIpInput').value || '').trim();
+  const hours = parseInt(document.getElementById('blockHoursInput').value, 10) || 24;
+  if (!ip) { showToast('❌ Enter an IP address', true); return; }
+  const log = document.getElementById('blockLog');
+  try {
+    const resp = await fetch(`${API}/api/security/block`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ ip, hours, reason: 'manual-portal' }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { log.textContent = '❌ ' + (data.error || `HTTP ${resp.status}`); log.style.color = '#f87171'; }
+    else { log.textContent = `✅ Blocked ${ip} for ${hours}h`; log.style.color = '#4ade80'; }
+    log.style.display = 'block';
+    loadSecurityStats();
+  } catch (err) { log.textContent = '❌ ' + err.message; log.style.color = '#f87171'; log.style.display = 'block'; }
+}
+
+async function doUnblockIp() {
+  const ip = (document.getElementById('unblockIpInput').value || '').trim();
+  if (!ip) { showToast('❌ Enter an IP address', true); return; }
+  const log = document.getElementById('blockLog');
+  try {
+    const resp = await fetch(`${API}/api/security/unblock`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ ip }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { log.textContent = '❌ ' + (data.error || `HTTP ${resp.status}`); log.style.color = '#f87171'; }
+    else { log.textContent = `✅ Unblocked ${ip}`; log.style.color = '#4ade80'; }
+    log.style.display = 'block';
+    loadSecurityStats();
+  } catch (err) { log.textContent = '❌ ' + err.message; log.style.color = '#f87171'; log.style.display = 'block'; }
+}
+
+// ── Analytics Charts ──────────────────────────────────────────────────────────
+let _chartQ = null, _chartL = null, _chartH = null;
+
+async function loadAnalytics() {
+  try {
+    const resp = await fetch(`${API}/api/analytics/summary`);
+    if (!resp.ok) return;
+    const { today } = await resp.json();
+    if (!today) return;
+
+    // KPIs
+    const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+    document.getElementById('aKpiQueries').textContent = fmt(today.queries      ?? 0);
+    document.getElementById('aKpiOpens'  ).textContent = fmt(today.widgetOpens  ?? 0);
+    document.getElementById('aKpiTts'    ).textContent = fmt(today.ttsPlays     ?? 0);
+    document.getElementById('aKpiClicks' ).textContent = fmt(today.articleClicks ?? 0);
+    const peakH = today.peakHour ?? null;
+    document.getElementById('aKpiPeak').textContent =
+      peakH !== null ? `${peakH}:00` : '—';
+
+    const hasData = (today.queries ?? 0) > 0;
+    document.getElementById('analyticsEmpty').style.display  = hasData ? 'none' : 'block';
+    document.getElementById('analyticsCharts').style.display = hasData ? 'grid' : 'none';
+    if (!hasData) return;
+
+    const chartDefaults = {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#8BACC8', font: { size: 11 } } } },
+    };
+    const axisStyle = { color: '#8BACC8', font: { size: 10 } };
+
+    // ── Bar: Top queries
+    const qLabels = (today.topQueries || []).map(([q]) => q.length > 28 ? q.slice(0, 27) + '…' : q);
+    const qData   = (today.topQueries || []).map(([, c]) => c);
+    if (_chartQ) _chartQ.destroy();
+    _chartQ = new Chart(document.getElementById('chartQueries'), {
+      type: 'bar',
+      data: {
+        labels: qLabels,
+        datasets: [{ label: 'Times asked', data: qData,
+          backgroundColor: 'rgba(232,137,12,0.75)', borderColor: '#F5A623',
+          borderWidth: 1, borderRadius: 4 }],
+      },
+      options: {
+        ...chartDefaults,
+        indexAxis: 'y',
+        scales: {
+          x: { ticks: axisStyle, grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { ticks: { ...axisStyle, font: { size: 9 } }, grid: { color: 'rgba(255,255,255,0.03)' } },
+        },
+        plugins: { ...chartDefaults.plugins, legend: { display: false } },
+      },
+    });
+
+    // ── Pie: Language split
+    const lb = today.langBreakdown || {};
+    if (_chartL) _chartL.destroy();
+    _chartL = new Chart(document.getElementById('chartLang'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Telugu', 'English'],
+        datasets: [{ data: [lb.te || 0, lb.en || 0],
+          backgroundColor: ['#E8890C', '#2980B9'], borderWidth: 2,
+          borderColor: '#1E3248' }],
+      },
+      options: {
+        ...chartDefaults,
+        cutout: '58%',
+        plugins: { legend: { position: 'bottom', labels: { color: '#8BACC8', font: { size: 11 }, padding: 12 } } },
+      },
+    });
+
+    // ── Line: Hourly traffic
+    // Normalize to exactly 24 entries — guards against truncated arrays from the backend
+    const hData = Array.from({ length: 24 }, (_, i) => (today.hourlyBreakdown || [])[i] || 0);
+    const hLabels = Array.from({ length: 24 }, (_, i) => `${i}h`);
+    if (_chartH) _chartH.destroy();
+    _chartH = new Chart(document.getElementById('chartHourly'), {
+      type: 'line',
+      data: {
+        labels: hLabels,
+        datasets: [{ label: 'Queries', data: hData,
+          borderColor: '#27AE60', backgroundColor: 'rgba(39,174,96,0.15)',
+          fill: true, tension: 0.35, pointRadius: 2, pointHoverRadius: 5 }],
+      },
+      options: {
+        ...chartDefaults,
+        scales: {
+          x: { ticks: { ...axisStyle, maxTicksLimit: 12 }, grid: { color: 'rgba(255,255,255,0.05)' } },
+          y: { ticks: axisStyle, grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true },
+        },
+      },
+    });
+  } catch (_) {}
+}
+
 // Load on start
 refreshList();
+checkAutoRefreshStatus();
+loadCacheStatus();
+loadAnalytics();
+setInterval(() => { loadCacheStatus(); loadSecurityStats(); loadAnalytics(); }, 30000);
 </script>
 </body>
 </html>

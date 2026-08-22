@@ -52,3 +52,29 @@ newsai/
 6. Language toggle (Telugu/English)
 7. Chrome extension
 8. Backend server (pdf/scrape modes)
+
+## Extension Widget Sync — IMPORTANT
+`extension/widget/newsai-widget.js` is a SEPARATE BUNDLED COPY of `widget/newsai-widget.js`.
+After ANY edit to the main widget or its CSS, run:
+```bash
+./sync-extension.sh
+# or from backend/:
+npm run sync:ext
+```
+Then reload the extension in chrome://extensions (click the ↺ refresh button).
+
+The backend also serves the widget live at `http://localhost:3001/widget/newsai-widget.js` —
+this is always the latest version as long as the backend is running.
+
+## Active AI Model
+Gemini 2.5 Flash Lite via `/api/ai` SSE streaming proxy in backend/routes/ai.js.
+Claude API key in config is NOT used for AI responses — only Gemini key (in backend/.env) matters.
+
+## TTS
+Sarvam Bulbul v3 via `/api/tts/stream` — voices: kavya (te), neha (en).
+Browser Web Speech API is the fallback (and is used for live streaming TTS during voice mode).
+
+## Security — Never Violate
+- GEMINI_API_KEY and SARVAM_API_KEY must never leave the backend
+- All URL-fetching routes must use isSafeUrl() to prevent SSRF
+- Rate limiting stays active on all /api routes
